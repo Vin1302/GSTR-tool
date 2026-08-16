@@ -168,11 +168,14 @@ def discover_files(folder: str | Path) -> list[Path]:
     extracted = folder / "_extracted"
     extracted.mkdir(exist_ok=True)
     files: list[Path] = []
-    for path in folder.iterdir():
+    for path in folder.rglob("*"):
+        if extracted in path.parents or not path.is_file():
+            continue
         if path.suffix.lower() == ".zip":
             with zipfile.ZipFile(path) as archive:
-                archive.extractall(extracted / path.stem)
-        elif path.is_file():
+                relative = path.relative_to(folder).with_suffix("")
+                archive.extractall(extracted / relative)
+        else:
             files.append(path)
     files.extend(path for path in extracted.rglob("*") if path.is_file())
     return files

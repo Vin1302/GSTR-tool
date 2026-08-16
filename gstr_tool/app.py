@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -34,6 +35,30 @@ class PipelineWorker(QObject):
             self.finished.emit(run(*self.args))
         except Exception as exc:  # noqa: BLE001
             logging.exception("GSTR processing failed")
+            self.failed.emit(str(exc))
+
+
+class DownloadWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, session, credential, financial_year):
+        super().__init__()
+        self.session = session
+        self.credential = credential
+        self.financial_year = financial_year
+
+    def start(self):
+        try:
+            result = self.session.download_financial_year(
+                self.credential,
+                self.financial_year,
+                progress=lambda percent, message: self.progress.emit(percent, message),
+            )
+            self.finished.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("Automatic GST download failed")
             self.failed.emit(str(exc))
 
 
@@ -75,6 +100,15 @@ class MainWindow(QWidget):
         self.dashboard_button = QPushButton("Login completed — open Returns Dashboard")
         self.dashboard_button.clicked.connect(self.open_dashboard)
         login_form.addRow(self.dashboard_button)
+        self.financial_year_combo = QComboBox()
+        current_start = date.today().year if date.today().month >= 4 else date.today().year - 1
+        for start_year in range(current_start, 2016, -1):
+            self.financial_year_combo.addItem(f"{start_year}-{str(start_year + 1)[-2:]}")
+        login_form.addRow("Financial year:", self.financial_year_combo)
+        self.download_all_button = QPushButton("Download complete selected financial year")
+        self.download_all_button.setMinimumHeight(40)
+        self.download_all_button.clicked.connect(self.download_financial_year)
+        login_form.addRow(self.download_all_button)
         layout.addWidget(login_box)
 
         process_box = QGroupBox("2. Build reconciliation workbook")
@@ -143,11 +177,52 @@ class MainWindow(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Login not complete", str(exc))
 
+    def download_financial_year(self):
+        if not self.browser_session:
+            QMessageBox.information(self, "Login needed", "Open GST login and complete CAPTCHA/OTP first."); return
+        if not self.browser_session.is_logged_in():
+            QMessageBox.information(self, "Login not complete", "Complete CAPTCHA/OTP and click Login in Chrome first."); return
+        credential = self.credentials[self.client_combo.currentIndex()]
+        financial_year = self.financial_year_combo.currentText()
+        self.download_all_button.setEnabled(False)
+        self.progress.setRange(0, 100); self.progress.setValue(0); self.progress.show()
+        self.status.setText(f"Downloading {financial_year} returns for {credential.label}…")
+        self.thread = QThread()
+        self.worker = DownloadWorker(self.browser_session, credential, financial_year)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.start)
+        self.worker.progress.connect(self.download_progress)
+        self.worker.finished.connect(self.download_done)
+        self.worker.failed.connect(self.download_failed)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.failed.connect(self.thread.quit)
+        self.thread.start()
+
+    def download_progress(self, percent, message):
+        self.progress.setValue(percent)
+        self.status.setText(message)
+
+    def download_done(self, result):
+        self.progress.hide(); self.download_all_button.setEnabled(True)
+        self.download_path.setText(result["root"])
+        unavailable = [message for message in result["results"] if "not available" in message or "not ready" in message]
+        message = f"Automatic GST download completed. Files are separated under {result['root']}."
+        if unavailable:
+            message += f" {len(unavailable)} period/report downloads were unavailable or still being generated; review the status messages and retry if needed."
+        message += " The E-Invoice folder is prepared, but e-Invoice portal login/download requires its own authenticated session."
+        self.status.setText(message)
+        QMessageBox.information(self, "Financial-year download completed", message)
+
+    def download_failed(self, message):
+        self.progress.hide(); self.download_all_button.setEnabled(True)
+        self.status.setText(message)
+        QMessageBox.critical(self, "Automatic download failed", message)
+
     def generate(self):
         fields = [self.template_path.text(), self.download_path.text(), self.output_path.text()]
         if not all(fields):
             QMessageBox.information(self, "Files needed", "Choose the template, GST download folder, and output folder."); return
-        self.progress.show(); self.generate_button.setEnabled(False); self.status.setText("Reading GST downloads and preserving template formulas…")
+        self.progress.setRange(0, 0); self.progress.show(); self.generate_button.setEnabled(False); self.status.setText("Reading GST downloads and preserving template formulas…")
         self.thread = QThread(); self.worker = PipelineWorker(*fields); self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.start); self.worker.finished.connect(self.done); self.worker.failed.connect(self.failed)
         self.worker.finished.connect(self.thread.quit); self.worker.failed.connect(self.thread.quit); self.thread.start()

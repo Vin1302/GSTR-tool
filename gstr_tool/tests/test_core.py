@@ -8,6 +8,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from gstr_tool.core.credentials import load_credentials
+from gstr_tool.core.browser import financial_year_periods
 from gstr_tool.core.parsers import parse_download_folder
 from gstr_tool.core.template_writer import generate_workbook
 
@@ -16,6 +17,12 @@ TEMPLATE = Path("/Users/vineetgarg/Downloads/GSTR template.xlsx")
 
 
 class GstrToolTests(unittest.TestCase):
+    def test_financial_year_periods(self):
+        periods = financial_year_periods("2025-26")
+        self.assertEqual(periods[0], ("042025", "Apr-2025"))
+        self.assertEqual(periods[-1], ("032026", "Mar-2026"))
+        self.assertEqual(len(periods), 12)
+
     def test_credentials_aliases(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "credentials.xlsx"
@@ -36,14 +43,16 @@ class GstrToolTests(unittest.TestCase):
             sheet.append(["Invoice Number", "Invoice Date", "Status", "Document Type", "Taxable Value", "IGST", "CGST", "SGST", "Cess"])
             sheet.append(["INV-1", "05/04/2025", "Valid", "Invoice", 1000, 180, 0, 0, 0])
             sheet.append(["INV-2", "06/04/2025", "Cancelled", "Invoice", 9999, 1799, 0, 0, 0])
-            einvoice.save(downloads / "einvoice.xlsx")
+            einvoice_folder = downloads / "E-Invoice"; einvoice_folder.mkdir()
+            einvoice.save(einvoice_folder / "einvoice.xlsx")
 
             two_b = Workbook(); sheet = two_b.active
             sheet.append(["Invoice Number", "Invoice Date", "Supplier Name", "GSTIN", "Taxable Value", "IGST", "CGST", "SGST", "Cess", "RCM", "ITC Availability", "2B Period"])
             sheet.append(["P-1", "07/04/2025", "Vendor A", "19AAAAA0000A1Z5", 500, 90, 0, 0, 0, "No", "Yes", "Apr-25"])
             sheet.append(["P-2", "08/04/2025", "Vendor B", "19BBBBB0000B1Z5", 700, 0, 63, 63, 0, "Yes", "Yes", "Apr-25"])
             sheet.append(["P-3", "09/04/2025", "Vendor C", "19CCCCC0000C1Z5", 900, 162, 0, 0, 0, "No", "No", "Apr-25"])
-            two_b.save(downloads / "gstr2b.xlsx")
+            two_b_folder = downloads / "GSTR-2B"; two_b_folder.mkdir()
+            two_b.save(two_b_folder / "gstr2b.xlsx")
 
             (downloads / "gstr3b.json").write_text(json.dumps({
                 "ret_period": "042025", "sup_details": {"osup_det": {"txval": 2000, "iamt": 360}},

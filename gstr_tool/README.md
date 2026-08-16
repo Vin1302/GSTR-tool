@@ -6,8 +6,9 @@ A modular Windows desktop MVP for downloading GST return data with a human-in-th
 
 1. Choose an Excel credential file. The app accepts common headers such as `Client Name`, `GSTIN`, `User ID`, and `Password`.
 2. Select a client and click **Open GST login**. Chrome opens with the username and password filled. The user completes CAPTCHA/OTP and clicks **Login**.
-3. Open the Returns Dashboard and download GSTR-1, GSTR-3B and GSTR-2B files into the selected folder. Download the e-Invoice report into the same folder.
-4. Choose `GSTR template.xlsx` and click **Generate GSTR workbook**.
+3. Select a financial year and click **Download complete selected financial year**. The app iterates April through March and downloads every available GSTR-1, GSTR-3B and GSTR-2B report.
+4. Files are saved under `<base folder>/<client>/<financial year>/GSTR-1`, `GSTR-3B`, `GSTR-2B`, and `E-Invoice`.
+5. Choose `GSTR template.xlsx` and click **Generate GSTR workbook**.
 
 ## Business rules implemented
 
@@ -65,4 +66,12 @@ The password is kept only in application memory. The tool does not log it or cop
 - Template cell mappings are isolated in `core/template_writer.py`.
 - New GST reports can be added without changing the UI or existing parsers.
 
-Direct GST portal automation is intentionally limited to preparing the login and opening the dashboard. CAPTCHA/OTP and the final login action remain manual, and download navigation may need adjustment when GSTN changes its portal UI.
+Direct GST portal automation starts after the user completes CAPTCHA/OTP and the final login action. Download navigation may need adjustment when GSTN changes its portal UI.
+
+## Automatic download boundaries
+
+- CAPTCHA, OTP and the final Login click remain manual and are never bypassed.
+- After successful GST login, GSTR-1, GSTR-3B and GSTR-2B downloads are automatic for all 12 periods of the selected financial year.
+- The GST Portal can generate some files asynchronously. The app waits up to two minutes for each file and records an unavailable/not-ready status when GSTN has not produced it yet; the user can retry.
+- The e-Invoice portal has a separate authentication/session. The application creates the `E-Invoice` folder, but the current automatic GST session cannot reuse GST Portal authentication for e-Invoice downloads.
+- Portal selectors are isolated in `core/browser.py` so GSTN UI changes can be updated without changing workbook logic.
