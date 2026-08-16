@@ -216,7 +216,11 @@ class GstBrowserSession:
             for element in context.find_elements(By.XPATH, xpath):
                 if element.is_displayed() and element.is_enabled():
                     self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
-                    element.click()
+                    time.sleep(0.3)
+                    try:
+                        element.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", element)
                     return True
         return False
 
@@ -290,9 +294,9 @@ class GstBrowserSession:
         time.sleep(2)
         if not self._wait_and_click_text(download_labels, timeout=25):
             return f"{report} {period_label}: detail-page download action not available"
-        downloaded = self._wait_for_download(folder, before)
+        downloaded = self._wait_for_download(folder, before, timeout=45)
         if downloaded is None:
-            return f"{report} {period_label}: request submitted; file not ready within 120 seconds"
+            return f"{report} {period_label}: download did not arrive within 45 seconds"
         safe_report = report.replace("-", "")
         renamed = downloaded.with_name(f"{period_label}_{safe_report}_{downloaded.name}")
         if renamed != downloaded and not renamed.exists():
@@ -364,13 +368,33 @@ class GstBrowserSession:
              ["download gstr-2b details (excel)"], False),
         )
         for month, quarter, period_label in periods:
+            try:
+                if progress:
+                    progress(int(completed * 100 / total),
+                             f"{period_label}: selecting FY, Quarter {quarter}, {month}, then SEARCH…")
+                self._prepare_period(financial_year, quarter, month)
+            except Exception as exc:
+                message = f"{period_label}: dashboard preparation failed: {exc}"
+                results.extend([message] * len(jobs))
+                completed += len(jobs)
+                if progress:
+                    progress(int(completed * 100 / total), message)
+                continue
             for report, tile_labels, view_labels, download_labels, close_summary in jobs:
                 try:
-                    self._prepare_period(financial_year, quarter, month)
+                    if progress:
+                        progress(int(completed * 100 / total),
+                                 f"{report} {period_label}: opening report, scrolling down and downloading…")
+                    if self._tile(tile_labels) is None:
+                        self._prepare_period(financial_year, quarter, month)
+                    results_url = self.driver.current_url
                     message = self._download_from_detail(
                         report, period_label, report_folders[report], tile_labels,
                         view_labels, download_labels, close_summary,
                     )
+                    if self.driver.current_url != results_url:
+                        self.driver.back()
+                        time.sleep(3)
                 except Exception as exc:
                     message = f"{report} {period_label}: dashboard/download failed: {exc}"
                 results.append(message)
