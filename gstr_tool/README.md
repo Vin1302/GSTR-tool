@@ -75,6 +75,6 @@ Direct GST portal automation starts after the user completes CAPTCHA/OTP and the
 - Chrome is minimized after login by default so the download process can run without occupying the user's screen. This can be disabled in the application.
 - After successful GST login, GSTR-1, GSTR-3B and GSTR-2B downloads are automatic for all 12 periods of the selected financial year.
 - The GST Portal can generate some files asynchronously. The app waits up to two minutes for each file and records an unavailable/not-ready status when GSTN has not produced it yet; the user can retry.
-- The e-Invoice portal has a separate authentication/session. The application creates the `E-Invoice` folder, but the current automatic GST session cannot reuse GST Portal authentication for e-Invoice downloads.
+- e-Invoice downloads are taken from the GSTR-1 area of the GST Returns Dashboard and stored in the separate `E-Invoice` folder.
 - Portal selectors are isolated in `core/browser.py` so GSTN UI changes can be updated without changing workbook logic.
 - Every run creates `download_status.txt` in the client/FY folder, listing each successful, unavailable, or failed period/report download.

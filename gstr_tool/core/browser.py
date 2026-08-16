@@ -12,7 +12,7 @@ from .models import GstCredential
 
 LOG = logging.getLogger(__name__)
 GST_LOGIN_URL = "https://services.gst.gov.in/services/login"
-RETURNS_DASHBOARD_URL = "https://return.gst.gov.in/returns/auth/dashboard"
+GST_DASHBOARD_URL = "https://services.gst.gov.in/services/auth/dashboard"
 
 
 def financial_year_periods(financial_year: str) -> list[tuple[str, str]]:
@@ -81,10 +81,7 @@ class GstBrowserSession:
     def open_returns_dashboard(self) -> None:
         if not self.is_logged_in():
             raise RuntimeError("Complete CAPTCHA and click Login in the browser first.")
-        self.dismiss_post_login_prompts()
-        self.driver.get(RETURNS_DASHBOARD_URL)
-        time.sleep(2)
-        self.dismiss_post_login_prompts()
+        self.navigate_returns_dashboard()
 
     def dismiss_post_login_prompts(self, timeout: int = 12) -> list[str]:
         """Dismiss non-mandatory GST onboarding reminders without accepting anything."""
@@ -145,8 +142,9 @@ class GstBrowserSession:
                 selector = Select(element)
                 attempts = []
                 if text:
-                    attempts.extend((lambda: selector.select_by_visible_text(text),
-                                     lambda: selector.select_by_visible_text(text.replace("-", " - "))))
+                    labels = self._financial_year_labels(text) if re.fullmatch(r"\d{4}-\d{2,4}", text) else [text]
+                    for label in labels:
+                        attempts.append(lambda label=label: selector.select_by_visible_text(label))
                 if value:
                     attempts.append(lambda: selector.select_by_value(value))
                 for attempt in attempts:
@@ -154,7 +152,52 @@ class GstBrowserSession:
                         attempt(); return
                     except Exception:  # try the next portal representation
                         continue
+                if text:
+                    start_year = re.sub(r"\D", "", text)[:4]
+                    expected_end = str(int(start_year) + 1) if len(start_year) == 4 else ""
+                    for option in selector.options:
+                        digits = re.sub(r"\D", "", option.text)
+                        if digits.startswith(start_year) and expected_end and digits.endswith(expected_end):
+                            selector.select_by_visible_text(option.text)
+                            return
         raise RuntimeError(f"GST Portal selection was not found: {text or value}")
+
+    @staticmethod
+    def _financial_year_labels(value: str) -> list[str]:
+        start = int(value[:4])
+        end = start + 1
+        return [f"{start}-{end}", f"{start} - {end}", f"{start}-{str(end)[-2:]}", f"{start} - {str(end)[-2:]}"]
+
+    def navigate_returns_dashboard(self) -> None:
+        """Navigate through Services → Returns → Returns Dashboard."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.action_chains import ActionChains
+
+        self.driver.get(GST_DASHBOARD_URL)
+        time.sleep(2)
+        self.dismiss_post_login_prompts()
+
+        def visible_exact(label: str):
+            xpath = (
+                "//*[self::a or self::button or self::span]"
+                f"[translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')='{label.lower()}']"
+            )
+            return [item for item in self.driver.find_elements(By.XPATH, xpath) if item.is_displayed()]
+
+        services = visible_exact("Services")
+        if services:
+            ActionChains(self.driver).move_to_element(services[0]).click().perform()
+            time.sleep(1)
+        returns = visible_exact("Returns")
+        if returns:
+            ActionChains(self.driver).move_to_element(returns[0]).click().perform()
+            time.sleep(1)
+        dashboard = visible_exact("Returns Dashboard")
+        if not dashboard:
+            raise RuntimeError("Services → Returns → Returns Dashboard menu was not found.")
+        dashboard[0].click()
+        time.sleep(3)
+        self.dismiss_post_login_prompts()
 
     def _click_text(self, labels: list[str], root=None) -> bool:
         from selenium.webdriver.common.by import By
@@ -253,13 +296,11 @@ class GstBrowserSession:
             folder.mkdir(parents=True, exist_ok=True)
         results: list[str] = []
         periods = financial_year_periods(financial_year)
-        total = len(periods) * 3
+        total = len(periods) * 4
         completed = 0
         for period_code, period_label in periods:
             try:
-                self.driver.get(RETURNS_DASHBOARD_URL)
-                time.sleep(2)
-                self.dismiss_post_login_prompts()
+                self.navigate_returns_dashboard()
                 self._select([
                     "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
                     "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
@@ -277,7 +318,7 @@ class GstBrowserSession:
             except Exception as exc:
                 message = f"{period_label}: dashboard preparation failed: {exc}"
                 results.append(message)
-                completed += 3
+                completed += 4
                 if progress:
                     progress(int(completed * 100 / total), message)
                 continue
@@ -285,6 +326,7 @@ class GstBrowserSession:
                 ("GSTR-1", ["gstr-1", "gstr 1"], ["download", "view filed"]),
                 ("GSTR-3B", ["gstr-3b", "gstr 3b"], ["download", "view filed"]),
                 ("GSTR-2B", ["gstr-2b", "gstr 2b", "auto-drafted itc"], ["download"]),
+                ("E-Invoice", ["gstr-1", "gstr 1"], ["e-invoice", "e invoice"]),
             )
             for report, tile_labels, actions in jobs:
                 message = self._download_report(report, period_label, report_folders[report], tile_labels, actions)
@@ -292,7 +334,6 @@ class GstBrowserSession:
                 completed += 1
                 if progress:
                     progress(int(completed * 100 / total), message)
-        results.append("E-Invoice: separate portal authentication is required; folder prepared only.")
         manifest = root / "download_status.txt"
         manifest.write_text("\n".join(results) + "\n", encoding="utf-8")
         return {

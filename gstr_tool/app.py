@@ -113,7 +113,7 @@ class MainWindow(QWidget):
         self.financial_year_combo = QComboBox()
         current_start = date.today().year if date.today().month >= 4 else date.today().year - 1
         for start_year in range(current_start, 2016, -1):
-            self.financial_year_combo.addItem(f"{start_year}-{str(start_year + 1)[-2:]}")
+            self.financial_year_combo.addItem(f"{start_year}-{start_year + 1}")
         login_form.addRow("Financial year:", self.financial_year_combo)
         self.download_all_button = QPushButton("Download complete selected financial year")
         self.download_all_button.setMinimumHeight(40)
@@ -246,7 +246,6 @@ class MainWindow(QWidget):
         message = f"Automatic GST download completed. Files are separated under {result['root']}."
         if unavailable:
             message += f" {len(unavailable)} period/report downloads were unavailable or still being generated; review the status messages and retry if needed."
-        message += " The E-Invoice folder is prepared, but e-Invoice portal login/download requires its own authenticated session."
         self.status.setText(message)
         QMessageBox.information(self, "Financial-year download completed", message)
 

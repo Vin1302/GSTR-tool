@@ -18,7 +18,7 @@ TEMPLATE = Path("/Users/vineetgarg/Downloads/GSTR template.xlsx")
 
 class GstrToolTests(unittest.TestCase):
     def test_financial_year_periods(self):
-        periods = financial_year_periods("2025-26")
+        periods = financial_year_periods("2025-2026")
         self.assertEqual(periods[0], ("042025", "Apr-2025"))
         self.assertEqual(periods[-1], ("032026", "Mar-2026"))
         self.assertEqual(len(periods), 12)
