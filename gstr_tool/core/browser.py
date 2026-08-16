@@ -15,20 +15,21 @@ GST_LOGIN_URL = "https://services.gst.gov.in/services/login"
 GST_DASHBOARD_URL = "https://services.gst.gov.in/services/auth/dashboard"
 
 
-def financial_year_periods(financial_year: str) -> list[tuple[str, str]]:
-    """Return (portal period code, readable folder/file prefix) for Apr-Mar."""
+def financial_year_periods(financial_year: str) -> list[tuple[str, str, str]]:
+    """Return (month name, quarter number, readable label) for Apr-Mar."""
     match = re.fullmatch(r"(\d{4})-(\d{2}|\d{4})", financial_year.strip())
     if not match:
         raise ValueError("Financial year must look like 2025-26.")
     start = int(match.group(1))
     end = start + 1
-    return [
-        (f"{month:02d}{start}", datetime(start, month, 1).strftime("%b-%Y"))
-        for month in range(4, 13)
-    ] + [
-        (f"{month:02d}{end}", datetime(end, month, 1).strftime("%b-%Y"))
-        for month in range(1, 4)
-    ]
+    periods = []
+    for month in range(4, 13):
+        periods.append((datetime(start, month, 1).strftime("%B"), str(((month - 4) // 3) + 1),
+                        datetime(start, month, 1).strftime("%b-%Y")))
+    for month in range(1, 4):
+        periods.append((datetime(end, month, 1).strftime("%B"), "4",
+                        datetime(end, month, 1).strftime("%b-%Y")))
+    return periods
 
 
 class GstBrowserSession:
@@ -156,6 +157,9 @@ class GstBrowserSession:
                     start_year = re.sub(r"\D", "", text)[:4]
                     expected_end = str(int(start_year) + 1) if len(start_year) == 4 else ""
                     for option in selector.options:
+                        if text.lower() in option.text.lower():
+                            selector.select_by_visible_text(option.text)
+                            return
                         digits = re.sub(r"\D", "", option.text)
                         if digits.startswith(start_year) and expected_end and digits.endswith(expected_end):
                             selector.select_by_visible_text(option.text)
@@ -237,12 +241,64 @@ class GstBrowserSession:
             needle = label.lower()
             xpath = (
                 "//*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-                f"'{needle}')]/ancestor::div[contains(@class,'card') or contains(@class,'tile') or contains(@class,'panel')][1]"
+                f"'{needle}')]/ancestor::div[.//button or .//a][1]"
             )
             visible = [element for element in self.driver.find_elements(By.XPATH, xpath) if element.is_displayed()]
             if visible:
                 return visible[0]
         return None
+
+    def _prepare_period(self, financial_year: str, quarter: str, month: str) -> None:
+        """Open File Returns and reproduce the GST Portal's FY/quarter/month flow."""
+        self.navigate_returns_dashboard()
+        self._select([
+            "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
+            "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
+            "//label[contains(.,'Financial Year')]/following::select[1]",
+        ], text=financial_year)
+        self._select([
+            "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'quarter')]",
+            "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'quarter')]",
+            "//label[contains(.,'Quarter')]/following::select[1]",
+        ], text=f"Quarter {quarter}")
+        self._select([
+            "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
+            "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
+            "//label[contains(.,'Period')]/following::select[1]",
+        ], text=month)
+        if not self._click_text(["search"]):
+            raise RuntimeError("GST Portal SEARCH button was not found.")
+        time.sleep(4)
+        self.dismiss_post_login_prompts()
+
+    def _download_from_detail(self, report: str, period_label: str, folder: Path,
+                              tile_labels: list[str], view_labels: list[str],
+                              download_labels: list[str], close_summary: bool = False) -> str:
+        """Open a return's VIEW page and click its report-specific download button."""
+        self._set_download_directory(folder)
+        before = self._snapshot(folder)
+        tile = self._tile(tile_labels)
+        if tile is None:
+            return f"{report} {period_label}: tile not available"
+        if not self._click_text(view_labels, tile):
+            return f"{report} {period_label}: VIEW action not available"
+        time.sleep(4)
+        self.dismiss_post_login_prompts(timeout=2)
+        if close_summary:
+            self._wait_and_click_text(["close"], timeout=8)
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        if not self._wait_and_click_text(download_labels, timeout=25):
+            return f"{report} {period_label}: detail-page download action not available"
+        downloaded = self._wait_for_download(folder, before)
+        if downloaded is None:
+            return f"{report} {period_label}: request submitted; file not ready within 120 seconds"
+        safe_report = report.replace("-", "")
+        renamed = downloaded.with_name(f"{period_label}_{safe_report}_{downloaded.name}")
+        if renamed != downloaded and not renamed.exists():
+            downloaded.rename(renamed)
+            downloaded = renamed
+        return f"{report} {period_label}: {downloaded.name}"
 
     @staticmethod
     def _snapshot(folder: Path) -> set[Path]:
@@ -298,38 +354,25 @@ class GstBrowserSession:
         periods = financial_year_periods(financial_year)
         total = len(periods) * 4
         completed = 0
-        for period_code, period_label in periods:
-            try:
-                self.navigate_returns_dashboard()
-                self._select([
-                    "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
-                    "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
-                    "//label[contains(.,'Financial Year')]/following::select[1]",
-                ], text=financial_year)
-                self._select([
-                    "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
-                    "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
-                    "//label[contains(.,'Return Filing Period')]/following::select[1]",
-                ], value=period_code)
-                if not self._click_text(["search"]):
-                    raise RuntimeError("GST Portal SEARCH button was not found.")
-                time.sleep(3)
-                self.dismiss_post_login_prompts()
-            except Exception as exc:
-                message = f"{period_label}: dashboard preparation failed: {exc}"
-                results.append(message)
-                completed += 4
-                if progress:
-                    progress(int(completed * 100 / total), message)
-                continue
-            jobs = (
-                ("GSTR-1", ["gstr-1", "gstr 1"], ["download", "view filed"]),
-                ("GSTR-3B", ["gstr-3b", "gstr 3b"], ["download", "view filed"]),
-                ("GSTR-2B", ["gstr-2b", "gstr 2b", "auto-drafted itc"], ["download"]),
-                ("E-Invoice", ["gstr-1", "gstr 1"], ["e-invoice", "e invoice"]),
-            )
-            for report, tile_labels, actions in jobs:
-                message = self._download_report(report, period_label, report_folders[report], tile_labels, actions)
+        jobs = (
+            ("GSTR-1", ["details of outward supplies", "gstr-1"], ["view"], ["download (pdf)"], False),
+            ("E-Invoice", ["details of outward supplies", "gstr-1"], ["view"],
+             ["download details from e-invoices (excel)"], False),
+            ("GSTR-3B", ["monthly return gstr-3b", "gstr-3b"], ["view gstr3b", "view"],
+             ["download filed gstr-3b"], True),
+            ("GSTR-2B", ["auto-drafted itc statement", "gstr-2b"], ["view"],
+             ["download gstr-2b details (excel)"], False),
+        )
+        for month, quarter, period_label in periods:
+            for report, tile_labels, view_labels, download_labels, close_summary in jobs:
+                try:
+                    self._prepare_period(financial_year, quarter, month)
+                    message = self._download_from_detail(
+                        report, period_label, report_folders[report], tile_labels,
+                        view_labels, download_labels, close_summary,
+                    )
+                except Exception as exc:
+                    message = f"{report} {period_label}: dashboard/download failed: {exc}"
                 results.append(message)
                 completed += 1
                 if progress:

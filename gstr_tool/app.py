@@ -113,7 +113,7 @@ class MainWindow(QWidget):
         self.financial_year_combo = QComboBox()
         current_start = date.today().year if date.today().month >= 4 else date.today().year - 1
         for start_year in range(current_start, 2016, -1):
-            self.financial_year_combo.addItem(f"{start_year}-{start_year + 1}")
+            self.financial_year_combo.addItem(f"{start_year}-{str(start_year + 1)[-2:]}")
         login_form.addRow("Financial year:", self.financial_year_combo)
         self.download_all_button = QPushButton("Download complete selected financial year")
         self.download_all_button.setMinimumHeight(40)
