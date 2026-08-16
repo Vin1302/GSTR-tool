@@ -177,8 +177,10 @@ class GstBrowserSession:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.common.action_chains import ActionChains
 
-        self.driver.get(GST_DASHBOARD_URL)
-        time.sleep(2)
+        # Never load an authenticated GST route directly. GSTN rejects direct
+        # navigation with "Access Denied" even when the browser is logged in.
+        if self._has_visible_period_selects():
+            return
         self.dismiss_post_login_prompts()
 
         def visible_exact(label: str):
@@ -202,6 +204,19 @@ class GstBrowserSession:
         dashboard[0].click()
         time.sleep(3)
         self.dismiss_post_login_prompts()
+
+    def _has_visible_period_selects(self) -> bool:
+        from selenium.webdriver.common.by import By
+
+        selects = self.driver.find_elements(By.XPATH, "//select")
+        visible_text = " ".join(
+            (element.get_attribute("id") or "") + " " + (element.get_attribute("name") or "")
+            for element in selects if element.is_displayed()
+        ).lower()
+        page_text = (self.driver.find_element(By.TAG_NAME, "body").text or "").lower()
+        return len([element for element in selects if element.is_displayed()]) >= 3 and (
+            "financial year" in page_text and "quarter" in page_text and "period" in page_text
+        ) and "access denied" not in page_text
 
     def _click_text(self, labels: list[str], root=None) -> bool:
         from selenium.webdriver.common.by import By
@@ -260,11 +275,13 @@ class GstBrowserSession:
             "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
             "//label[contains(.,'Financial Year')]/following::select[1]",
         ], text=financial_year)
+        time.sleep(1)
         self._select([
             "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'quarter')]",
             "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'quarter')]",
             "//label[contains(.,'Quarter')]/following::select[1]",
         ], text=f"Quarter {quarter}")
+        time.sleep(1)
         self._select([
             "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
             "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
@@ -274,6 +291,8 @@ class GstBrowserSession:
             raise RuntimeError("GST Portal SEARCH button was not found.")
         time.sleep(4)
         self.dismiss_post_login_prompts()
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
 
     def _download_from_detail(self, report: str, period_label: str, folder: Path,
                               tile_labels: list[str], view_labels: list[str],
