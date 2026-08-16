@@ -107,7 +107,7 @@ class MainWindow(QWidget):
         self.auto_download_checkbox = QCheckBox("Start downloads automatically after successful login")
         self.auto_download_checkbox.setChecked(True)
         login_form.addRow(self.auto_download_checkbox)
-        self.background_checkbox = QCheckBox("Minimize Chrome while automatic downloads run")
+        self.background_checkbox = QCheckBox("Minimize Chrome while downloads run (experimental)")
         self.background_checkbox.setChecked(False)
         login_form.addRow(self.background_checkbox)
         self.financial_year_combo = QComboBox()

@@ -56,6 +56,11 @@ class GstBrowserSession:
         options = webdriver.ChromeOptions()
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
+        # GST pages rely on JavaScript timers and asynchronous rendering. Keep
+        # those active if the user chooses to minimize the automated browser.
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-renderer-backgrounding")
         options.add_argument("--start-maximized")
         options.add_experimental_option("prefs", {
             "download.default_directory": str(self.download_dir),
