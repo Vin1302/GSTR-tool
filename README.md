@@ -6,19 +6,27 @@ A modular Windows desktop MVP for downloading GST return data with a human-in-th
 
 1. Choose an Excel credential file. The app accepts common headers such as `Client Name`, `GSTIN`, `User ID`, and `Password`.
 2. Select a client and click **Open GST login**. Chrome opens with the username and password filled. The user completes CAPTCHA/OTP and clicks **Login**.
-3. The app detects successful login, clicks only optional **Remind me later** onboarding prompts, minimizes Chrome, and automatically starts the selected financial-year download. The manual download button remains available for retries.
+3. The app detects successful login, clicks only optional **Remind me later** onboarding prompts, minimizes Chrome to the taskbar, and automatically starts the selected financial-year download. The manual download button remains available for retries.
 4. Files are saved under `<base folder>/<client>/<financial year>/GSTR-1`, `GSTR-3B`, `GSTR-2B`, and `E-Invoice`.
 5. Choose `GSTR template.xlsx` and click **Generate GSTR workbook**.
 
 ## What is downloaded for each period
 
-| Report | Portal path | Files kept |
+After selecting the financial year, quarter and period and clicking SEARCH, each
+period is worked in this order:
+
+| Step | Portal path | File kept |
 |---|---|---|
-| GSTR-1 | Tile → **DOWNLOAD** → *Generate JSON file to download* | `<period>_GSTR1_json_*` |
-| GSTR-1 | Tile → **VIEW** → **VIEW SUMMARY** → *Download summary (PDF)* | `<period>_GSTR1_pdf_*` |
-| e-Invoice | GSTR-1 detail page → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
-| GSTR-3B | Tile → **VIEW GSTR3B** → *Download filed GSTR-3B (PDF)* | `<period>_GSTR3B_pdf_*` |
-| GSTR-2B | Tile → **DOWNLOAD** → *Generate excel file to download* | `<period>_GSTR2B_excel_*` |
+| 1. e-Invoice | GSTR-1 tile → **VIEW** → scroll down → **VIEW INVOICES** → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
+| 2. GSTR-1 PDF | back on the GSTR-1 page → **VIEW SUMMARY** → *Download summary (PDF)* | `<period>_GSTR1_pdf_*` |
+| 3. GSTR-1 JSON | GSTR-1 tile → **DOWNLOAD** → *Generate JSON file to download* | `<period>_GSTR1_json_*` |
+| 4. GSTR-3B | Tile → **DOWNLOAD** → *generate/download the filed return* | `<period>_GSTR3B_*` |
+| 5. GSTR-2B | Tile → **DOWNLOAD** → *Generate excel file to download* | `<period>_GSTR2B_excel_*` |
+
+Steps 1, 2, 4 and 5 mirror the manual routine. Step 3 is an addition: the filed
+JSON is what gives the `As per GSTR 1` sheet invoice-level accuracy, because the
+summary PDF only carries section totals. If GSTR-3B has no DOWNLOAD button for a
+period, the tool falls back to **VIEW GSTR3B** → *Download filed GSTR-3B (PDF)*.
 
 The GSTR-1 JSON and the GSTR-2B Excel are what the workbook is built from. The
 GSTR-1 summary PDF is kept as the user's copy and is also used as a fallback for
@@ -31,8 +39,8 @@ machine-readable download at all, so its PDF is read directly.
   the chosen folder is already a client folder, a financial-year folder or one of
   the four report folders, those segments are peeled off first — a second run
   updates the same folders instead of nesting new ones inside them.
-- Files already downloaded for a period are skipped, so a re-run only fills the
-  gaps. Clear **Update the existing client folder** to force a fresh download.
+- Files already downloaded for a period are always skipped, so a re-run only
+  fills the gaps. Delete a file to have it fetched again.
 - ZIP archives from GSTN are expanded into a temporary directory during workbook
   generation, never into the client folder.
 - `download_status.txt` is appended to, with a timestamp per run, so earlier
@@ -112,7 +120,7 @@ Direct GST portal automation starts after the user completes CAPTCHA/OTP and the
 
 - CAPTCHA, OTP and the final Login click remain manual and are never bypassed.
 - Optional Aadhaar/e-KYC and profile/metadata reminders are dismissed using **Remind me later**; the app never accepts or submits those enrolments.
-- Chrome is minimized after login by default so the download process can run without occupying the user's screen. This can be disabled in the application.
+- Chrome is minimized to the taskbar once the download starts, so the run does not occupy the screen. Anti-throttling flags keep GST's JavaScript timers alive while it is minimized.
 - After successful GST login, GSTR-1 (JSON + summary PDF), e-Invoice, GSTR-3B (filed PDF) and GSTR-2B (Excel) downloads are automatic for all 12 periods of the selected financial year.
 - The GST Portal can generate some files asynchronously. The app waits up to two minutes for each file and records an unavailable/not-ready status when GSTN has not produced it yet; the user can retry.
 - e-Invoice downloads are taken from the GSTR-1 area of the GST Returns Dashboard and stored in the separate `E-Invoice` folder.

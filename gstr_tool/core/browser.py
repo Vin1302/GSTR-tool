@@ -118,17 +118,23 @@ class GstBrowserSession:
                 time.sleep(0.5)
         return dismissed
 
-    def run_in_background(self) -> None:
-        """Keep Chrome compact but rendered so GST JavaScript is not suspended."""
-        if self.driver is not None:
+    def minimize_browser(self) -> None:
+        """Minimize Chrome to the taskbar so the run does not occupy the screen.
+
+        The anti-throttling flags set in ``open_login`` keep GST's JavaScript
+        timers alive while the window is minimized. If the window manager
+        refuses to minimize, Chrome is moved off-screen instead so the download
+        still proceeds unattended.
+        """
+        if self.driver is None:
+            return
+        try:
+            self.driver.minimize_window()
+        except Exception:
             try:
-                width = 520
-                height = 640
-                screen_width = self.driver.execute_script("return screen.availWidth;") or 1280
-                self.driver.set_window_size(width, height)
-                self.driver.set_window_position(max(0, int(screen_width) - width), 0)
+                self.driver.set_window_position(-2000, 0)
             except Exception:
-                self.driver.set_window_size(520, 640)
+                LOG.warning("Chrome could not be minimized; it stays on screen")
 
     def restore_browser(self) -> None:
         if self.driver is not None:
@@ -453,6 +459,42 @@ class GstBrowserSession:
         self.dismiss_post_login_prompts(timeout=2)
         return True
 
+    def _has_button(self, labels: list[str]) -> bool:
+        """Report whether a button is on the page without clicking it."""
+        from selenium.webdriver.common.by import By
+
+        upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lower = "abcdefghijklmnopqrstuvwxyz"
+        for label in labels:
+            xpath = (
+                "//*[self::button or self::a or @role='button']"
+                f"[contains(translate(normalize-space(.),'{upper}','{lower}'),'{label.lower()}')]"
+            )
+            for element in self.driver.find_elements(By.XPATH, xpath):
+                if element.is_displayed() and element.is_enabled():
+                    return True
+        return False
+
+    def _back_until(self, labels: list[str], attempts: int = 3) -> bool:
+        """Step back with the portal's BACK control until a page with ``labels`` shows.
+
+        GSTN answers "Access Denied" to direct navigation of authenticated
+        routes even in a logged-in browser, so returning to a previous page is
+        only ever done through BACK, never by loading its URL.
+        """
+        for _ in range(attempts):
+            if self._has_button(labels):
+                return True
+            if not self._click_exact_button(["back"]):
+                self.driver.back()
+            time.sleep(4)
+            self.dismiss_post_login_prompts(timeout=2)
+        return self._has_button(labels)
+
+    def _scroll_to_bottom(self) -> None:
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1.5)
+
     # ------------------------------------------------------------------
     # Per-report download flows
     # ------------------------------------------------------------------
@@ -460,17 +502,57 @@ class GstBrowserSession:
     GSTR3B_TILE = ["monthly return gstr-3b", "monthly return gstr3b", "gstr-3b"]
     GSTR2B_TILE = ["auto-drafted itc statement", "gstr-2b"]
 
+    E_INVOICE_LABELS = ["download details from e-invoices (excel)",
+                        "download details from e-invoice (excel)",
+                        "download e-invoice details", "e-invoice download",
+                        "download details from e-invoices"]
+
     def _download_gstr1_group(self, period_label: str, folders: dict[str, Path],
                               results_url: str) -> list[str]:
-        """GSTR-1 tile: filed JSON, summary PDF and the e-invoice Excel.
+        """Walk the GSTR-1 tile the way the portal is navigated by hand.
 
-        The JSON is what the reconciliation workbook is built from; the PDF is
-        the copy the user keeps. Both live in the GSTR-1 folder, the e-invoice
-        Excel goes to its own folder.
+        VIEW opens the return, scrolling down reveals VIEW INVOICES where the
+        e-invoice Excel is taken, and coming back to that same page VIEW
+        SUMMARY leads to the summary PDF. The filed JSON is fetched last: it is
+        not part of the manual routine, but it is what gives the ``As per
+        GSTR 1`` sheet invoice-level accuracy.
         """
         messages: list[str] = []
 
-        # 1. DOWNLOAD → GENERATE JSON FILE TO DOWNLOAD (machine-readable filed return).
+        # 1. VIEW on the tile opens the GSTR-1 return.
+        if not self._open_tile_action(self.GSTR1_TILE, ["view"]):
+            return [f"E-Invoice {period_label}: GSTR-1 VIEW action not available",
+                    f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available",
+                    f"GSTR-1 JSON {period_label}: GSTR-1 VIEW action not available"]
+
+        # 2. Scroll down and open VIEW INVOICES, which holds the e-invoice export.
+        self._scroll_to_bottom()
+        opened_invoices = self._wait_and_click_text(
+            ["view invoices", "view invoice", "e-invoices", "e-invoice"], timeout=15)
+        if opened_invoices:
+            time.sleep(3)
+            self.dismiss_post_login_prompts(timeout=2)
+        messages.append(self._download_here(
+            "E-Invoice", period_label, folders["E-Invoice"],
+            self.E_INVOICE_LABELS, timeout=90,
+        ))
+
+        # 3. Back on the GSTR-1 page, VIEW SUMMARY opens the page with the PDF.
+        if opened_invoices:
+            self._back_until(["view summary"])
+        if self._click_exact_button(["view summary"]) or self._wait_and_click_text(
+                ["view summary"], timeout=10):
+            time.sleep(4)
+            self.dismiss_post_login_prompts(timeout=2)
+        messages.append(self._download_here(
+            "GSTR-1", period_label, folders["GSTR-1"],
+            ["download summary (pdf)", "download (pdf)", "download pdf",
+             "download summary", "preview gstr-1 (pdf)"],
+            kind="pdf", timeout=90,
+        ))
+        self._return_to_monthly_tiles(results_url)
+
+        # 4. DOWNLOAD → GENERATE JSON FILE TO DOWNLOAD, for the workbook figures.
         if self._open_tile_action(self.GSTR1_TILE, ["download"]):
             messages.append(self._download_here(
                 "GSTR-1", period_label, folders["GSTR-1"],
@@ -481,52 +563,43 @@ class GstBrowserSession:
         else:
             messages.append(f"GSTR-1 JSON {period_label}: DOWNLOAD action not available on the tile")
         self._return_to_monthly_tiles(results_url)
-
-        # 2. VIEW → the GSTR-1 detail page carries the e-invoice Excel export…
-        if not self._open_tile_action(self.GSTR1_TILE, ["view summary", "view"]):
-            messages.append(f"E-Invoice {period_label}: GSTR-1 VIEW action not available")
-            messages.append(f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available")
-            return messages
-        messages.append(self._download_here(
-            "E-Invoice", period_label, folders["E-Invoice"],
-            ["download details from e-invoices (excel)",
-             "download details from e-invoice (excel)",
-             "download e-invoice details", "e-invoice download"],
-            timeout=90,
-        ))
-
-        # 3. …and VIEW SUMMARY from there opens the page holding the summary PDF.
-        if self._click_exact_button(["view summary"]):
-            time.sleep(4)
-            self.dismiss_post_login_prompts(timeout=2)
-        messages.append(self._download_here(
-            "GSTR-1", period_label, folders["GSTR-1"],
-            ["download summary (pdf)", "download (pdf)", "download pdf",
-             "download summary", "preview gstr-1 (pdf)"],
-            kind="pdf", timeout=90,
-        ))
-        self._return_to_monthly_tiles(results_url)
         return messages
 
+    GSTR3B_DOWNLOAD_LABELS = ["download filed gstr-3b (pdf)", "download filed gstr-3b",
+                              "download filed gstr3b", "generate pdf file to download",
+                              "generate excel file to download", "generate file to download",
+                              "download gstr-3b (pdf)", "download (pdf)", "download pdf"]
+
     def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
-        """GSTR-3B tile: VIEW GSTR3B, close the system-generated popup, take the filed PDF."""
+        """GSTR-3B tile: DOWNLOAD, then the generate control on the download page.
+
+        If that tile has no DOWNLOAD button for this period, the older
+        VIEW GSTR3B → DOWNLOAD FILED GSTR-3B (PDF) route is tried instead. The
+        PDF spellings are listed first because the reconciliation workbook reads
+        the filed PDF — GSTN publishes no machine-readable filed GSTR-3B.
+        """
+        if self._open_tile_action(self.GSTR3B_TILE, ["download"]):
+            message = self._download_here(
+                "GSTR-3B", period_label, folder, self.GSTR3B_DOWNLOAD_LABELS, generated=True,
+            )
+            self._return_to_monthly_tiles(results_url)
+            if "not available" not in message:
+                return [message]
+
         if not self._open_tile_action(self.GSTR3B_TILE, ["view gstr3b", "view gstr-3b", "view"]):
-            return [f"GSTR-3B {period_label}: VIEW action not available"]
+            return [f"GSTR-3B {period_label}: DOWNLOAD and VIEW actions were both unavailable"]
         # A "system generated GSTR-3B" dialog can sit in front of the summary.
         self._wait_and_click_text(["close"], timeout=8)
         message = self._download_here(
-            "GSTR-3B", period_label, folder,
-            ["download filed gstr-3b (pdf)", "download filed gstr-3b", "download filed gstr3b",
-             "download gstr-3b (pdf)", "download (pdf)", "download pdf"],
-            kind="pdf", timeout=90,
+            "GSTR-3B", period_label, folder, self.GSTR3B_DOWNLOAD_LABELS, timeout=90,
         )
         self._return_to_monthly_tiles(results_url)
         return [message]
 
     def _download_gstr2b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
         """GSTR-2B tile: DOWNLOAD → GENERATE EXCEL FILE TO DOWNLOAD."""
-        if not self._open_tile_action(self.GSTR2B_TILE, ["download", "view"]):
-            return [f"GSTR-2B {period_label}: DOWNLOAD action not available"]
+        if not self._open_tile_action(self.GSTR2B_TILE, ["download"]):
+            return [f"GSTR-2B {period_label}: DOWNLOAD action not available on the tile"]
         message = self._download_here(
             "GSTR-2B", period_label, folder,
             ["generate excel file to download", "download gstr-2b details (excel)",

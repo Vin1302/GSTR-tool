@@ -107,12 +107,9 @@ class MainWindow(QWidget):
         self.auto_download_checkbox = QCheckBox("Start downloads automatically after successful login")
         self.auto_download_checkbox.setChecked(True)
         login_form.addRow(self.auto_download_checkbox)
-        self.background_checkbox = QCheckBox("Keep Chrome in a compact background window")
-        self.background_checkbox.setChecked(False)
-        login_form.addRow(self.background_checkbox)
-        self.skip_existing_checkbox = QCheckBox("Update the existing client folder — skip files already downloaded")
-        self.skip_existing_checkbox.setChecked(True)
-        login_form.addRow(self.skip_existing_checkbox)
+        login_form.addRow(QLabel(
+            "Chrome is minimized during the run, and the existing client folder is "
+            "updated — files already downloaded for a period are skipped."))
         self.financial_year_combo = QComboBox()
         current_start = date.today().year if date.today().month >= 4 else date.today().year - 1
         for start_year in range(current_start, 2016, -1):
@@ -176,10 +173,7 @@ class MainWindow(QWidget):
             if not self.download_path.text(): return
         try:
             if self.browser_session: self.browser_session.close()
-            self.browser_session = GstBrowserSession(
-                self.download_path.text(),
-                skip_existing=self.skip_existing_checkbox.isChecked(),
-            )
+            self.browser_session = GstBrowserSession(self.download_path.text())
             self.browser_session.open_login(self.credentials[self.client_combo.currentIndex()])
             self.login_watcher.start()
             self.status.setText("GST login is ready. Complete CAPTCHA/OTP and click Login. The app will dismiss optional reminders and start automatically.")
@@ -219,11 +213,9 @@ class MainWindow(QWidget):
         financial_year = self.financial_year_combo.currentText()
         self._download_active = True
         self.login_watcher.stop()
-        self.browser_session.skip_existing = self.skip_existing_checkbox.isChecked()
         try:
             self.browser_session.dismiss_post_login_prompts()
-            if self.background_checkbox.isChecked():
-                self.browser_session.run_in_background()
+            self.browser_session.minimize_browser()
         except Exception as exc:
             self._download_active = False
             QMessageBox.warning(self, "Browser preparation failed", str(exc)); return
