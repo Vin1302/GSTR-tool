@@ -6,10 +6,10 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QProgressBar, QVBoxLayout, QWidget,
 )
 
@@ -71,6 +71,10 @@ class MainWindow(QWidget):
         self.browser_session: GstBrowserSession | None = None
         self.thread = None
         self.worker = None
+        self._download_active = False
+        self.login_watcher = QTimer(self)
+        self.login_watcher.setInterval(1500)
+        self.login_watcher.timeout.connect(self._poll_login)
         self._build_ui()
 
     def _build_ui(self):
@@ -100,6 +104,12 @@ class MainWindow(QWidget):
         self.dashboard_button = QPushButton("Login completed — open Returns Dashboard")
         self.dashboard_button.clicked.connect(self.open_dashboard)
         login_form.addRow(self.dashboard_button)
+        self.auto_download_checkbox = QCheckBox("Start downloads automatically after successful login")
+        self.auto_download_checkbox.setChecked(True)
+        login_form.addRow(self.auto_download_checkbox)
+        self.background_checkbox = QCheckBox("Minimize Chrome while automatic downloads run")
+        self.background_checkbox.setChecked(True)
+        login_form.addRow(self.background_checkbox)
         self.financial_year_combo = QComboBox()
         current_start = date.today().year if date.today().month >= 4 else date.today().year - 1
         for start_year in range(current_start, 2016, -1):
@@ -165,7 +175,8 @@ class MainWindow(QWidget):
             if self.browser_session: self.browser_session.close()
             self.browser_session = GstBrowserSession(self.download_path.text())
             self.browser_session.open_login(self.credentials[self.client_combo.currentIndex()])
-            self.status.setText("GST login is ready. Complete CAPTCHA and click Login in Chrome, then return here.")
+            self.login_watcher.start()
+            self.status.setText("GST login is ready. Complete CAPTCHA/OTP and click Login. The app will dismiss optional reminders and start automatically.")
         except Exception as exc:
             QMessageBox.critical(self, "Browser error", str(exc))
 
@@ -177,6 +188,22 @@ class MainWindow(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Login not complete", str(exc))
 
+    def _poll_login(self):
+        if not self.browser_session or self._download_active:
+            return
+        try:
+            if not self.browser_session.is_logged_in():
+                return
+            self.login_watcher.stop()
+            dismissed = self.browser_session.dismiss_post_login_prompts()
+            if dismissed:
+                self.status.setText(f"Login detected; dismissed {len(dismissed)} optional GST reminder(s).")
+            if self.auto_download_checkbox.isChecked():
+                self.download_financial_year()
+        except Exception as exc:
+            self.login_watcher.stop()
+            self.status.setText(f"Login was detected, but GST post-login preparation failed: {exc}")
+
     def download_financial_year(self):
         if not self.browser_session:
             QMessageBox.information(self, "Login needed", "Open GST login and complete CAPTCHA/OTP first."); return
@@ -184,6 +211,15 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Login not complete", "Complete CAPTCHA/OTP and click Login in Chrome first."); return
         credential = self.credentials[self.client_combo.currentIndex()]
         financial_year = self.financial_year_combo.currentText()
+        self._download_active = True
+        self.login_watcher.stop()
+        try:
+            self.browser_session.dismiss_post_login_prompts()
+            if self.background_checkbox.isChecked():
+                self.browser_session.run_in_background()
+        except Exception as exc:
+            self._download_active = False
+            QMessageBox.warning(self, "Browser preparation failed", str(exc)); return
         self.download_all_button.setEnabled(False)
         self.progress.setRange(0, 100); self.progress.setValue(0); self.progress.show()
         self.status.setText(f"Downloading {financial_year} returns for {credential.label}…")
@@ -203,6 +239,7 @@ class MainWindow(QWidget):
         self.status.setText(message)
 
     def download_done(self, result):
+        self._download_active = False
         self.progress.hide(); self.download_all_button.setEnabled(True)
         self.download_path.setText(result["root"])
         unavailable = [message for message in result["results"] if "not available" in message or "not ready" in message]
@@ -214,7 +251,10 @@ class MainWindow(QWidget):
         QMessageBox.information(self, "Financial-year download completed", message)
 
     def download_failed(self, message):
+        self._download_active = False
         self.progress.hide(); self.download_all_button.setEnabled(True)
+        if self.browser_session:
+            self.browser_session.restore_browser()
         self.status.setText(message)
         QMessageBox.critical(self, "Automatic download failed", message)
 

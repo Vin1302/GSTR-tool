@@ -6,7 +6,7 @@ A modular Windows desktop MVP for downloading GST return data with a human-in-th
 
 1. Choose an Excel credential file. The app accepts common headers such as `Client Name`, `GSTIN`, `User ID`, and `Password`.
 2. Select a client and click **Open GST login**. Chrome opens with the username and password filled. The user completes CAPTCHA/OTP and clicks **Login**.
-3. Select a financial year and click **Download complete selected financial year**. The app iterates April through March and downloads every available GSTR-1, GSTR-3B and GSTR-2B report.
+3. The app detects successful login, clicks only optional **Remind me later** onboarding prompts, minimizes Chrome, and automatically starts the selected financial-year download. The manual download button remains available for retries.
 4. Files are saved under `<base folder>/<client>/<financial year>/GSTR-1`, `GSTR-3B`, `GSTR-2B`, and `E-Invoice`.
 5. Choose `GSTR template.xlsx` and click **Generate GSTR workbook**.
 
@@ -71,7 +71,10 @@ Direct GST portal automation starts after the user completes CAPTCHA/OTP and the
 ## Automatic download boundaries
 
 - CAPTCHA, OTP and the final Login click remain manual and are never bypassed.
+- Optional Aadhaar/e-KYC and profile/metadata reminders are dismissed using **Remind me later**; the app never accepts or submits those enrolments.
+- Chrome is minimized after login by default so the download process can run without occupying the user's screen. This can be disabled in the application.
 - After successful GST login, GSTR-1, GSTR-3B and GSTR-2B downloads are automatic for all 12 periods of the selected financial year.
 - The GST Portal can generate some files asynchronously. The app waits up to two minutes for each file and records an unavailable/not-ready status when GSTN has not produced it yet; the user can retry.
 - The e-Invoice portal has a separate authentication/session. The application creates the `E-Invoice` folder, but the current automatic GST session cannot reuse GST Portal authentication for e-Invoice downloads.
 - Portal selectors are isolated in `core/browser.py` so GSTN UI changes can be updated without changing workbook logic.
+- Every run creates `download_status.txt` in the client/FY folder, listing each successful, unavailable, or failed period/report download.

@@ -53,6 +53,9 @@ class GstBrowserSession:
 
         self.download_dir.mkdir(parents=True, exist_ok=True)
         options = webdriver.ChromeOptions()
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-popup-blocking")
+        options.add_argument("--start-maximized")
         options.add_experimental_option("prefs", {
             "download.default_directory": str(self.download_dir),
             "download.prompt_for_download": False,
@@ -78,7 +81,49 @@ class GstBrowserSession:
     def open_returns_dashboard(self) -> None:
         if not self.is_logged_in():
             raise RuntimeError("Complete CAPTCHA and click Login in the browser first.")
+        self.dismiss_post_login_prompts()
         self.driver.get(RETURNS_DASHBOARD_URL)
+        time.sleep(2)
+        self.dismiss_post_login_prompts()
+
+    def dismiss_post_login_prompts(self, timeout: int = 12) -> list[str]:
+        """Dismiss non-mandatory GST onboarding reminders without accepting anything."""
+        if self.driver is None:
+            return []
+        dismissed: list[str] = []
+        deadline = time.time() + timeout
+        idle_checks = 0
+        labels = ["remind me later", "maybe later", "skip for now", "no thanks"]
+        while time.time() < deadline:
+            clicked = False
+            for label in labels:
+                if self._click_text([label]):
+                    dismissed.append(label)
+                    clicked = True
+                    idle_checks = 0
+                    time.sleep(1)
+                    break
+            if not clicked:
+                idle_checks += 1
+                if idle_checks >= 4:
+                    break
+                time.sleep(0.5)
+        return dismissed
+
+    def run_in_background(self) -> None:
+        """Minimize the automated Chrome window after manual login is complete."""
+        if self.driver is not None:
+            try:
+                self.driver.minimize_window()
+            except Exception:
+                self.driver.set_window_position(-32000, -32000)
+
+    def restore_browser(self) -> None:
+        if self.driver is not None:
+            try:
+                self.driver.maximize_window()
+            except Exception:
+                self.driver.set_window_position(0, 0)
 
     def _set_download_directory(self, folder: Path) -> None:
         folder.mkdir(parents=True, exist_ok=True)
@@ -128,6 +173,20 @@ class GstBrowserSession:
                     return True
         return False
 
+    def _wait_and_click_text(self, labels: list[str], timeout: int = 60, root=None) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if root is None:
+                self.dismiss_post_login_prompts(timeout=1)
+            try:
+                if self._click_text(labels, root):
+                    return True
+            except Exception:
+                if root is not None:
+                    return False
+            time.sleep(1)
+        return False
+
     def _tile(self, labels: list[str]):
         from selenium.webdriver.common.by import By
 
@@ -167,7 +226,12 @@ class GstBrowserSession:
             return f"{report} {period_label}: download action not available"
         time.sleep(2)
         # GST often opens a modal/menu after the first Download click.
-        self._click_text(["download json", "generate json", "download excel", "download filed", "download pdf"])
+        self._wait_and_click_text(
+            ["download json", "generate json", "download excel", "download filed", "download pdf"],
+            timeout=15,
+        )
+        # A generated file may appear as a separate link after GSTN processes it.
+        self._wait_and_click_text(["click here to download", "download generated file"], timeout=15)
         downloaded = self._wait_for_download(folder, before)
         if downloaded is None:
             return f"{report} {period_label}: request submitted; file not ready within 120 seconds"
@@ -192,21 +256,31 @@ class GstBrowserSession:
         total = len(periods) * 3
         completed = 0
         for period_code, period_label in periods:
-            self.driver.get(RETURNS_DASHBOARD_URL)
-            time.sleep(2)
-            self._select([
-                "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
-                "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
-                "//label[contains(.,'Financial Year')]/following::select[1]",
-            ], text=financial_year)
-            self._select([
-                "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
-                "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
-                "//label[contains(.,'Return Filing Period')]/following::select[1]",
-            ], value=period_code)
-            if not self._click_text(["search"]):
-                raise RuntimeError("GST Portal SEARCH button was not found.")
-            time.sleep(3)
+            try:
+                self.driver.get(RETURNS_DASHBOARD_URL)
+                time.sleep(2)
+                self.dismiss_post_login_prompts()
+                self._select([
+                    "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
+                    "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'fin')]",
+                    "//label[contains(.,'Financial Year')]/following::select[1]",
+                ], text=financial_year)
+                self._select([
+                    "//select[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
+                    "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
+                    "//label[contains(.,'Return Filing Period')]/following::select[1]",
+                ], value=period_code)
+                if not self._click_text(["search"]):
+                    raise RuntimeError("GST Portal SEARCH button was not found.")
+                time.sleep(3)
+                self.dismiss_post_login_prompts()
+            except Exception as exc:
+                message = f"{period_label}: dashboard preparation failed: {exc}"
+                results.append(message)
+                completed += 3
+                if progress:
+                    progress(int(completed * 100 / total), message)
+                continue
             jobs = (
                 ("GSTR-1", ["gstr-1", "gstr 1"], ["download", "view filed"]),
                 ("GSTR-3B", ["gstr-3b", "gstr 3b"], ["download", "view filed"]),
@@ -218,7 +292,15 @@ class GstBrowserSession:
                 completed += 1
                 if progress:
                     progress(int(completed * 100 / total), message)
-        return {"root": str(root), "folders": {key: str(value) for key, value in report_folders.items()}, "results": results}
+        results.append("E-Invoice: separate portal authentication is required; folder prepared only.")
+        manifest = root / "download_status.txt"
+        manifest.write_text("\n".join(results) + "\n", encoding="utf-8")
+        return {
+            "root": str(root),
+            "folders": {key: str(value) for key, value in report_folders.items()},
+            "results": results,
+            "manifest": str(manifest),
+        }
 
     @staticmethod
     def _safe_name(value: str) -> str:
