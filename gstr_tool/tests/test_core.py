@@ -120,7 +120,9 @@ class GstrToolTests(unittest.TestCase):
 
     def test_client_root_never_nests_on_repeated_runs(self):
         with tempfile.TemporaryDirectory() as folder:
-            base = Path(folder)
+            # resolve() first: Windows hands out 8.3 short temp paths
+            # (RUNNER~1), and resolve_client_root returns the long form.
+            base = Path(folder).resolve()
             first = GstBrowserSession.resolve_client_root(base, "Acme Pvt Ltd", "2025-26")
             self.assertEqual(first, base / "Acme_Pvt_Ltd" / "2025-26")
             # Re-running from the folder the previous run produced, or from one
