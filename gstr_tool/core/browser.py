@@ -337,6 +337,13 @@ class GstBrowserSession:
         self.dismiss_post_login_prompts(timeout=2)
         if close_summary:
             self._wait_and_click_text(["close"], timeout=8)
+        return self._download_open_detail(report, period_label, folder, download_labels)
+
+    def _download_open_detail(self, report: str, period_label: str, folder: Path,
+                              download_labels: list[str]) -> str:
+        """Download one file from a return detail page that is already open."""
+        self._set_download_directory(folder)
+        before = self._snapshot(folder)
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
         if not self._wait_and_click_text(download_labels, timeout=25):
@@ -406,9 +413,6 @@ class GstBrowserSession:
         total = len(periods) * 4
         completed = 0
         jobs = (
-            ("GSTR-1", ["details of outward supplies", "gstr-1"], ["view"], ["download (pdf)"], False),
-            ("E-Invoice", ["details of outward supplies", "gstr-1"], ["view"],
-             ["download details from e-invoices (excel)"], False),
             ("GSTR-3B", ["monthly return gstr-3b", "gstr-3b"], ["view gstr3b", "view"],
              ["download filed gstr-3b"], True),
             ("GSTR-2B", ["auto-drafted itc statement", "gstr-2b"], ["view"],
@@ -422,11 +426,49 @@ class GstBrowserSession:
                 self._prepare_period(financial_year, quarter, month)
             except Exception as exc:
                 message = f"{period_label}: dashboard preparation failed: {exc}"
-                results.extend([message] * len(jobs))
-                completed += len(jobs)
+                results.extend([message] * 4)
+                completed += 4
                 if progress:
                     progress(int(completed * 100 / total), message)
                 continue
+
+            # GSTR-1 PDF and e-invoice Excel are both on the same GSTR-1 VIEW
+            # page. Download both before returning to the monthly tile list.
+            gstr1_tile_labels = ["details of outward supplies", "gstr-1"]
+            try:
+                if progress:
+                    progress(int(completed * 100 / total),
+                             f"GSTR-1 {period_label}: clicking VIEW and opening the summary…")
+                results_url = self.driver.current_url
+                tile = self._tile(gstr1_tile_labels)
+                if tile is None or not self._click_text(["view summary", "view"], tile):
+                    raise RuntimeError("GSTR-1 VIEW action was not found")
+                time.sleep(4)
+                self.dismiss_post_login_prompts(timeout=2)
+                for report, labels in (
+                    ("GSTR-1", ["download (pdf)"]),
+                    ("E-Invoice", ["download details from e-invoices (excel)"]),
+                ):
+                    if progress:
+                        progress(int(completed * 100 / total),
+                                 f"{report} {period_label}: scrolling to its download button…")
+                    message = self._download_open_detail(
+                        report, period_label, report_folders[report], labels,
+                    )
+                    results.append(message)
+                    completed += 1
+                    if progress:
+                        progress(int(completed * 100 / total), message)
+                if self.driver.current_url != results_url:
+                    self.driver.back()
+                    time.sleep(3)
+            except Exception as exc:
+                message = f"GSTR-1/E-Invoice {period_label}: download failed: {exc}"
+                results.extend([message, message])
+                completed += 2
+                if progress:
+                    progress(int(completed * 100 / total), message)
+
             for report, tile_labels, view_labels, download_labels, close_summary in jobs:
                 try:
                     if progress:
