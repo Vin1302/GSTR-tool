@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+downloads/
+output/
+build/
+dist/
+release/
+*.spec.bak

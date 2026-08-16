@@ -1,0 +1,1 @@
+"""GSTR Tool desktop application."""
