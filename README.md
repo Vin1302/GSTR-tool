@@ -18,20 +18,19 @@ period is worked in this order:
 | Step | Portal path | File kept |
 |---|---|---|
 | 1. e-Invoice | GSTR-1 tile → **VIEW** → scroll down → **VIEW INVOICES** → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
-| 2. GSTR-1 PDF | back on the GSTR-1 page → **VIEW SUMMARY** → *Download summary (PDF)* | `<period>_GSTR1_pdf_*` |
-| 3. GSTR-1 JSON | GSTR-1 tile → **DOWNLOAD** → *Generate JSON file to download* | `<period>_GSTR1_json_*` |
-| 4. GSTR-3B | Tile → **DOWNLOAD** → *generate/download the filed return* | `<period>_GSTR3B_*` |
-| 5. GSTR-2B | Tile → **DOWNLOAD** → *Generate excel file to download* | `<period>_GSTR2B_excel_*` |
+| 2. GSTR-1 | back on the GSTR-1 page → **VIEW SUMMARY** → *Download summary (PDF)* | `<period>_GSTR1_pdf_*` |
+| 3. GSTR-3B | Tile → **DOWNLOAD** → *generate/download the filed return* | `<period>_GSTR3B_*` |
+| 4. GSTR-2B | Tile → **DOWNLOAD** → *Generate excel file to download* | `<period>_GSTR2B_excel_*` |
 
-Steps 1, 2, 4 and 5 mirror the manual routine. Step 3 is an addition: the filed
-JSON is what gives the `As per GSTR 1` sheet invoice-level accuracy, because the
-summary PDF only carries section totals. If GSTR-3B has no DOWNLOAD button for a
-period, the tool falls back to **VIEW GSTR3B** → *Download filed GSTR-3B (PDF)*.
+Each report is fetched by exactly one route; nothing else is downloaded. A step
+that finds no matching button records the reason in `download_status.txt` and the
+run moves on to the next report.
 
-The GSTR-1 JSON and the GSTR-2B Excel are what the workbook is built from. The
-GSTR-1 summary PDF is kept as the user's copy and is also used as a fallback for
-any month whose JSON the portal did not produce. A filed GSTR-3B has no
-machine-readable download at all, so its PDF is read directly.
+The GSTR-2B Excel and the e-Invoice Excel are read directly. GSTR-1 and GSTR-3B
+are only published as PDFs on these routes, so both are read with the PDF reader
+in `core/pdf_reader.py`. Note that a GSTR-1 summary PDF carries section totals
+rather than invoice-level rows, so `As per GSTR 1` is populated at that
+granularity.
 
 ## Folder handling on repeated runs
 

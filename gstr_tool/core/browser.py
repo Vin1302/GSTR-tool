@@ -513,17 +513,14 @@ class GstBrowserSession:
 
         VIEW opens the return, scrolling down reveals VIEW INVOICES where the
         e-invoice Excel is taken, and coming back to that same page VIEW
-        SUMMARY leads to the summary PDF. The filed JSON is fetched last: it is
-        not part of the manual routine, but it is what gives the ``As per
-        GSTR 1`` sheet invoice-level accuracy.
+        SUMMARY leads to the summary PDF.
         """
         messages: list[str] = []
 
         # 1. VIEW on the tile opens the GSTR-1 return.
         if not self._open_tile_action(self.GSTR1_TILE, ["view"]):
             return [f"E-Invoice {period_label}: GSTR-1 VIEW action not available",
-                    f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available",
-                    f"GSTR-1 JSON {period_label}: GSTR-1 VIEW action not available"]
+                    f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available"]
 
         # 2. Scroll down and open VIEW INVOICES, which holds the e-invoice export.
         self._scroll_to_bottom()
@@ -551,18 +548,6 @@ class GstBrowserSession:
             kind="pdf", timeout=90,
         ))
         self._return_to_monthly_tiles(results_url)
-
-        # 4. DOWNLOAD → GENERATE JSON FILE TO DOWNLOAD, for the workbook figures.
-        if self._open_tile_action(self.GSTR1_TILE, ["download"]):
-            messages.append(self._download_here(
-                "GSTR-1", period_label, folders["GSTR-1"],
-                ["generate json file to download", "generate file to download",
-                 "download json", "generate json"],
-                kind="json", generated=True,
-            ))
-        else:
-            messages.append(f"GSTR-1 JSON {period_label}: DOWNLOAD action not available on the tile")
-        self._return_to_monthly_tiles(results_url)
         return messages
 
     GSTR3B_DOWNLOAD_LABELS = ["download filed gstr-3b (pdf)", "download filed gstr-3b",
@@ -573,25 +558,13 @@ class GstBrowserSession:
     def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
         """GSTR-3B tile: DOWNLOAD, then the generate control on the download page.
 
-        If that tile has no DOWNLOAD button for this period, the older
-        VIEW GSTR3B → DOWNLOAD FILED GSTR-3B (PDF) route is tried instead. The
-        PDF spellings are listed first because the reconciliation workbook reads
-        the filed PDF — GSTN publishes no machine-readable filed GSTR-3B.
+        The PDF spellings are listed first because the reconciliation workbook
+        reads the filed PDF — GSTN publishes no machine-readable filed GSTR-3B.
         """
-        if self._open_tile_action(self.GSTR3B_TILE, ["download"]):
-            message = self._download_here(
-                "GSTR-3B", period_label, folder, self.GSTR3B_DOWNLOAD_LABELS, generated=True,
-            )
-            self._return_to_monthly_tiles(results_url)
-            if "not available" not in message:
-                return [message]
-
-        if not self._open_tile_action(self.GSTR3B_TILE, ["view gstr3b", "view gstr-3b", "view"]):
-            return [f"GSTR-3B {period_label}: DOWNLOAD and VIEW actions were both unavailable"]
-        # A "system generated GSTR-3B" dialog can sit in front of the summary.
-        self._wait_and_click_text(["close"], timeout=8)
+        if not self._open_tile_action(self.GSTR3B_TILE, ["download"]):
+            return [f"GSTR-3B {period_label}: DOWNLOAD action not available on the tile"]
         message = self._download_here(
-            "GSTR-3B", period_label, folder, self.GSTR3B_DOWNLOAD_LABELS, timeout=90,
+            "GSTR-3B", period_label, folder, self.GSTR3B_DOWNLOAD_LABELS, generated=True,
         )
         self._return_to_monthly_tiles(results_url)
         return [message]
@@ -620,7 +593,7 @@ class GstBrowserSession:
             folder.mkdir(parents=True, exist_ok=True)
         results: list[str] = []
         periods = financial_year_periods(financial_year)
-        steps_per_period = 5
+        steps_per_period = 4
         total = len(periods) * steps_per_period
         completed = 0
 
@@ -643,7 +616,7 @@ class GstBrowserSession:
                 continue
 
             jobs = (
-                ("GSTR-1 / E-Invoice", 3,
+                ("GSTR-1 / E-Invoice", 2,
                  lambda label, url: self._download_gstr1_group(label, report_folders, url)),
                 ("GSTR-3B", 1,
                  lambda label, url: self._download_gstr3b(label, report_folders["GSTR-3B"], url)),
