@@ -13,6 +13,7 @@ from .models import GstCredential
 LOG = logging.getLogger(__name__)
 GST_LOGIN_URL = "https://services.gst.gov.in/services/login"
 GST_DASHBOARD_URL = "https://services.gst.gov.in/services/auth/dashboard"
+GST_LOGOUT_URL = "https://services.gst.gov.in/services/logout"
 
 
 def financial_year_periods(financial_year: str) -> list[tuple[str, str, str]]:
@@ -114,12 +115,16 @@ class GstBrowserSession:
         return dismissed
 
     def run_in_background(self) -> None:
-        """Minimize the automated Chrome window after manual login is complete."""
+        """Keep Chrome compact but rendered so GST JavaScript is not suspended."""
         if self.driver is not None:
             try:
-                self.driver.minimize_window()
+                width = 520
+                height = 640
+                screen_width = self.driver.execute_script("return screen.availWidth;") or 1280
+                self.driver.set_window_size(width, height)
+                self.driver.set_window_position(max(0, int(screen_width) - width), 0)
             except Exception:
-                self.driver.set_window_position(-32000, -32000)
+                self.driver.set_window_size(520, 640)
 
     def restore_browser(self) -> None:
         if self.driver is not None:
@@ -280,6 +285,38 @@ class GstBrowserSession:
                 self.driver.execute_script("arguments[0].click();", element)
             return True
         return False
+
+    def _click_exact_button(self, labels: list[str]) -> bool:
+        from selenium.webdriver.common.by import By
+
+        upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lower = "abcdefghijklmnopqrstuvwxyz"
+        for label in labels:
+            literal = label.strip().lower()
+            xpath = (
+                f"//button[translate(normalize-space(.),'{upper}','{lower}')='{literal}']"
+                f" | //a[translate(normalize-space(.),'{upper}','{lower}')='{literal}']"
+                f" | //input[translate(normalize-space(@value),'{upper}','{lower}')='{literal}']"
+            )
+            for element in self.driver.find_elements(By.XPATH, xpath):
+                if element.is_displayed() and element.is_enabled():
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+                    try:
+                        element.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", element)
+                    return True
+        return False
+
+    def _return_to_monthly_tiles(self, results_url: str) -> None:
+        """Use GST's BACK control so the selected month and tile results survive."""
+        if self._click_exact_button(["back"]):
+            time.sleep(4)
+        elif self.driver.current_url != results_url:
+            self.driver.back()
+            time.sleep(4)
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
 
     def _tile(self, labels: list[str]):
         from selenium.webdriver.common.by import By
@@ -446,8 +483,9 @@ class GstBrowserSession:
                 time.sleep(4)
                 self.dismiss_post_login_prompts(timeout=2)
                 for report, labels in (
-                    ("GSTR-1", ["download (pdf)"]),
-                    ("E-Invoice", ["download details from e-invoices (excel)"]),
+                    ("E-Invoice", ["download details from e-invoices (excel)",
+                                   "download details from e-invoice (excel)"]),
+                    ("GSTR-1", ["download(pdf)", "download (pdf)"]),
                 ):
                     if progress:
                         progress(int(completed * 100 / total),
@@ -459,9 +497,7 @@ class GstBrowserSession:
                     completed += 1
                     if progress:
                         progress(int(completed * 100 / total), message)
-                if self.driver.current_url != results_url:
-                    self.driver.back()
-                    time.sleep(3)
+                self._return_to_monthly_tiles(results_url)
             except Exception as exc:
                 message = f"GSTR-1/E-Invoice {period_label}: download failed: {exc}"
                 results.extend([message, message])
@@ -481,9 +517,7 @@ class GstBrowserSession:
                         report, period_label, report_folders[report], tile_labels,
                         view_labels, download_labels, close_summary,
                     )
-                    if self.driver.current_url != results_url:
-                        self.driver.back()
-                        time.sleep(3)
+                    self._return_to_monthly_tiles(results_url)
                 except Exception as exc:
                     message = f"{report} {period_label}: dashboard/download failed: {exc}"
                 results.append(message)
@@ -492,11 +526,13 @@ class GstBrowserSession:
                     progress(int(completed * 100 / total), message)
         manifest = root / "download_status.txt"
         manifest.write_text("\n".join(results) + "\n", encoding="utf-8")
+        logged_out = self.logout()
         return {
             "root": str(root),
             "folders": {key: str(value) for key, value in report_folders.items()},
             "results": results,
             "manifest": str(manifest),
+            "logged_out": logged_out,
         }
 
     @staticmethod
@@ -508,3 +544,14 @@ class GstBrowserSession:
         if self.driver is not None:
             self.driver.quit()
             self.driver = None
+
+    def logout(self) -> bool:
+        if self.driver is None:
+            return False
+        try:
+            self.driver.get(GST_LOGOUT_URL)
+            time.sleep(3)
+            return "login" in (self.driver.current_url or "").lower()
+        except Exception:
+            LOG.exception("GST logout failed")
+            return False

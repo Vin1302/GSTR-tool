@@ -6,8 +6,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QProgressBar, QVBoxLayout, QWidget,
@@ -107,7 +107,7 @@ class MainWindow(QWidget):
         self.auto_download_checkbox = QCheckBox("Start downloads automatically after successful login")
         self.auto_download_checkbox.setChecked(True)
         login_form.addRow(self.auto_download_checkbox)
-        self.background_checkbox = QCheckBox("Minimize Chrome while downloads run (experimental)")
+        self.background_checkbox = QCheckBox("Keep Chrome in a compact background window")
         self.background_checkbox.setChecked(False)
         login_form.addRow(self.background_checkbox)
         self.financial_year_combo = QComboBox()
@@ -242,11 +242,18 @@ class MainWindow(QWidget):
         self._download_active = False
         self.progress.hide(); self.download_all_button.setEnabled(True)
         self.download_path.setText(result["root"])
-        unavailable = [message for message in result["results"] if "not available" in message or "not ready" in message]
+        failure_terms = ("not available", "not ready", "not arrive", "not found", "failed", "error")
+        unavailable = [message for message in result["results"]
+                       if any(term in message.lower() for term in failure_terms)]
         message = f"Automatic GST download completed. Files are separated under {result['root']}."
         if unavailable:
             message += f" {len(unavailable)} period/report downloads were unavailable or still being generated; review the status messages and retry if needed."
+        if result.get("logged_out"):
+            message += " The GST account was logged out."
+        else:
+            message += " Automatic logout could not be confirmed; please check the browser."
         self.status.setText(message)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(result["root"]))
         QMessageBox.information(self, "Financial-year download completed", message)
 
     def download_failed(self, message):
