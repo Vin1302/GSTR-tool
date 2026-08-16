@@ -309,12 +309,19 @@ class GstBrowserSession:
         return False
 
     def _return_to_monthly_tiles(self, results_url: str) -> None:
-        """Use GST's BACK control so the selected month and tile results survive."""
-        if self._click_exact_button(["back"]):
-            time.sleep(4)
-        elif self.driver.current_url != results_url:
-            self.driver.back()
-            time.sleep(4)
+        """Use GST BACK controls until the selected month's tiles are restored."""
+        monthly_tile_labels = ["monthly return gstr-3b", "auto-drafted itc statement"]
+        for _ in range(3):
+            if self._tile(monthly_tile_labels) is not None:
+                break
+            if self._click_exact_button(["back"]):
+                time.sleep(4)
+                continue
+            if self.driver.current_url != results_url:
+                self.driver.back()
+                time.sleep(4)
+                continue
+            break
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
@@ -469,8 +476,9 @@ class GstBrowserSession:
                     progress(int(completed * 100 / total), message)
                 continue
 
-            # GSTR-1 PDF and e-invoice Excel are both on the same GSTR-1 VIEW
-            # page. Download both before returning to the monthly tile list.
+            # GSTR-1 requires two levels: VIEW opens its details dashboard,
+            # where e-invoice Excel is downloaded; VIEW SUMMARY then opens the
+            # summary page containing DOWNLOAD(PDF).
             gstr1_tile_labels = ["details of outward supplies", "gstr-1"]
             try:
                 if progress:
@@ -482,21 +490,34 @@ class GstBrowserSession:
                     raise RuntimeError("GSTR-1 VIEW action was not found")
                 time.sleep(4)
                 self.dismiss_post_login_prompts(timeout=2)
-                for report, labels in (
-                    ("E-Invoice", ["download details from e-invoices (excel)",
-                                   "download details from e-invoice (excel)"]),
-                    ("GSTR-1", ["download(pdf)", "download (pdf)"]),
-                ):
-                    if progress:
-                        progress(int(completed * 100 / total),
-                                 f"{report} {period_label}: scrolling to its download button…")
+                if progress:
+                    progress(int(completed * 100 / total),
+                             f"E-Invoice {period_label}: downloading Excel before summary…")
+                message = self._download_open_detail(
+                    "E-Invoice", period_label, report_folders["E-Invoice"],
+                    ["download details from e-invoices (excel)",
+                     "download details from e-invoice (excel)"],
+                )
+                results.append(message)
+                completed += 1
+                if progress:
+                    progress(int(completed * 100 / total), message)
+
+                if progress:
+                    progress(int(completed * 100 / total),
+                             f"GSTR-1 {period_label}: clicking VIEW SUMMARY…")
+                if not self._click_exact_button(["view summary"]):
+                    message = f"GSTR-1 {period_label}: VIEW SUMMARY action not available"
+                else:
+                    time.sleep(4)
                     message = self._download_open_detail(
-                        report, period_label, report_folders[report], labels,
+                        "GSTR-1", period_label, report_folders["GSTR-1"],
+                        ["download(pdf)", "download (pdf)"],
                     )
-                    results.append(message)
-                    completed += 1
-                    if progress:
-                        progress(int(completed * 100 / total), message)
+                results.append(message)
+                completed += 1
+                if progress:
+                    progress(int(completed * 100 / total), message)
                 self._return_to_monthly_tiles(results_url)
             except Exception as exc:
                 message = f"GSTR-1/E-Invoice {period_label}: download failed: {exc}"
