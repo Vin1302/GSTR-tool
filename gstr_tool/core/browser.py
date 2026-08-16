@@ -258,6 +258,29 @@ class GstBrowserSession:
             time.sleep(1)
         return False
 
+    def _click_returns_search(self) -> bool:
+        """Click only the File Returns SEARCH button, never Search Taxpayer."""
+        from selenium.webdriver.common.by import By
+
+        upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lower = "abcdefghijklmnopqrstuvwxyz"
+        xpath = (
+            f"//button[translate(normalize-space(.),'{upper}','{lower}')='search']"
+            f" | //input[@type='submit' and translate(normalize-space(@value),'{upper}','{lower}')='search']"
+            f" | //*[@role='button' and translate(normalize-space(.),'{upper}','{lower}')='search']"
+        )
+        for element in self.driver.find_elements(By.XPATH, xpath):
+            if not element.is_displayed() or not element.is_enabled():
+                continue
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+            time.sleep(0.3)
+            try:
+                element.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", element)
+            return True
+        return False
+
     def _tile(self, labels: list[str]):
         from selenium.webdriver.common.by import By
 
@@ -292,7 +315,7 @@ class GstBrowserSession:
             "//select[contains(translate(@name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'period')]",
             "//label[contains(.,'Period')]/following::select[1]",
         ], text=month)
-        if not self._click_text(["search"]):
+        if not self._click_returns_search():
             raise RuntimeError("GST Portal SEARCH button was not found.")
         time.sleep(4)
         self.dismiss_post_login_prompts()
