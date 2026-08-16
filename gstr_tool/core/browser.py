@@ -33,6 +33,9 @@ def financial_year_periods(financial_year: str) -> list[tuple[str, str, str]]:
     return periods
 
 
+REPORT_FOLDERS = ("GSTR-1", "GSTR-3B", "GSTR-2B", "E-Invoice")
+
+
 class GstBrowserSession:
     """Selenium-backed, human-in-the-loop GST Portal session.
 
@@ -40,8 +43,9 @@ class GstBrowserSession:
     navigation are isolated here because the GST Portal can change its UI.
     """
 
-    def __init__(self, download_dir: str | Path):
+    def __init__(self, download_dir: str | Path, skip_existing: bool = True):
         self.download_dir = Path(download_dir).resolve()
+        self.skip_existing = skip_existing
         self.driver = None
 
     def open_login(self, credential: GstCredential) -> None:
@@ -366,42 +370,6 @@ class GstBrowserSession:
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
 
-    def _download_from_detail(self, report: str, period_label: str, folder: Path,
-                              tile_labels: list[str], view_labels: list[str],
-                              download_labels: list[str], close_summary: bool = False) -> str:
-        """Open a return's VIEW page and click its report-specific download button."""
-        self._set_download_directory(folder)
-        before = self._snapshot(folder)
-        tile = self._tile(tile_labels)
-        if tile is None:
-            return f"{report} {period_label}: tile not available"
-        if not self._click_text(view_labels, tile):
-            return f"{report} {period_label}: VIEW action not available"
-        time.sleep(4)
-        self.dismiss_post_login_prompts(timeout=2)
-        if close_summary:
-            self._wait_and_click_text(["close"], timeout=8)
-        return self._download_open_detail(report, period_label, folder, download_labels)
-
-    def _download_open_detail(self, report: str, period_label: str, folder: Path,
-                              download_labels: list[str]) -> str:
-        """Download one file from a return detail page that is already open."""
-        self._set_download_directory(folder)
-        before = self._snapshot(folder)
-        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        if not self._wait_and_click_text(download_labels, timeout=25):
-            return f"{report} {period_label}: detail-page download action not available"
-        downloaded = self._wait_for_download(folder, before, timeout=45)
-        if downloaded is None:
-            return f"{report} {period_label}: download did not arrive within 45 seconds"
-        safe_report = report.replace("-", "")
-        renamed = downloaded.with_name(f"{period_label}_{safe_report}_{downloaded.name}")
-        if renamed != downloaded and not renamed.exists():
-            downloaded.rename(renamed)
-            downloaded = renamed
-        return f"{report} {period_label}: {downloaded.name}"
-
     @staticmethod
     def _snapshot(folder: Path) -> set[Path]:
         return {path for path in folder.glob("*") if path.is_file()}
@@ -416,137 +384,217 @@ class GstBrowserSession:
             time.sleep(1)
         return None
 
-    def _download_report(self, report: str, period_label: str, folder: Path,
-                         tile_labels: list[str], action_labels: list[str]) -> str:
+    @staticmethod
+    def _stored_name(report: str, period_label: str) -> str:
+        return f"{period_label}_{report.replace('-', '')}_"
+
+    def _existing_download(self, folder: Path, report: str, period_label: str,
+                           kind: str = "") -> Path | None:
+        """Return a file this period already produced so re-runs do not duplicate it."""
+        prefix = self._stored_name(report, period_label) + (f"{kind}_" if kind else "")
+        for path in sorted(folder.glob(f"{prefix}*")):
+            if path.is_file() and path.stat().st_size > 0:
+                return path
+        return None
+
+    def _store(self, downloaded: Path, report: str, period_label: str, kind: str = "") -> Path:
+        """Rename a fresh download so period, report and file kind stay obvious."""
+        prefix = self._stored_name(report, period_label) + (f"{kind}_" if kind else "")
+        if downloaded.name.startswith(prefix):
+            return downloaded
+        target = downloaded.with_name(prefix + downloaded.name)
+        counter = 2
+        while target.exists():
+            target = downloaded.with_name(f"{prefix}{counter}_{downloaded.name}")
+            counter += 1
+        downloaded.rename(target)
+        return target
+
+    def _download_here(self, report: str, period_label: str, folder: Path,
+                       download_labels: list[str], *, kind: str = "",
+                       generated: bool = False, timeout: int = 120) -> str:
+        """Click a download control on the page that is already open and keep the file.
+
+        ``generated`` covers the GST Portal pattern where the first click only asks
+        GSTN to build the file and a second link appears once it is ready.
+        """
+        label = f"{report}{' ' + kind.upper() if kind else ''} {period_label}"
+        if self.skip_existing:
+            existing = self._existing_download(folder, report, period_label, kind)
+            if existing is not None:
+                return f"{label}: already downloaded ({existing.name})"
         self._set_download_directory(folder)
         before = self._snapshot(folder)
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
+        if not self._wait_and_click_text(download_labels, timeout=25):
+            return f"{label}: download action not available on this page"
+        if generated:
+            # GSTN builds the archive asynchronously and then shows a second link.
+            # Some periods download straight away, so a missing link is not an
+            # error — the file wait below decides the outcome either way.
+            self._wait_and_click_text(
+                ["click here to download", "download generated file", "generated file"],
+                timeout=60,
+            )
+        downloaded = self._wait_for_download(folder, before, timeout=timeout)
+        if downloaded is None:
+            return f"{label}: file was not ready within {timeout} seconds"
+        return f"{label}: {self._store(downloaded, report, period_label, kind).name}"
+
+    def _open_tile_action(self, tile_labels: list[str], action_labels: list[str]) -> bool:
+        """Click an action button inside a Returns Dashboard tile."""
         tile = self._tile(tile_labels)
         if tile is None:
-            return f"{report} {period_label}: tile not available"
+            return False
         if not self._click_text(action_labels, tile):
-            return f"{report} {period_label}: download action not available"
-        time.sleep(2)
-        # GST often opens a modal/menu after the first Download click.
-        self._wait_and_click_text(
-            ["download json", "generate json", "download excel", "download filed", "download pdf"],
-            timeout=15,
+            return False
+        time.sleep(4)
+        self.dismiss_post_login_prompts(timeout=2)
+        return True
+
+    # ------------------------------------------------------------------
+    # Per-report download flows
+    # ------------------------------------------------------------------
+    GSTR1_TILE = ["details of outward supplies", "gstr-1"]
+    GSTR3B_TILE = ["monthly return gstr-3b", "monthly return gstr3b", "gstr-3b"]
+    GSTR2B_TILE = ["auto-drafted itc statement", "gstr-2b"]
+
+    def _download_gstr1_group(self, period_label: str, folders: dict[str, Path],
+                              results_url: str) -> list[str]:
+        """GSTR-1 tile: filed JSON, summary PDF and the e-invoice Excel.
+
+        The JSON is what the reconciliation workbook is built from; the PDF is
+        the copy the user keeps. Both live in the GSTR-1 folder, the e-invoice
+        Excel goes to its own folder.
+        """
+        messages: list[str] = []
+
+        # 1. DOWNLOAD → GENERATE JSON FILE TO DOWNLOAD (machine-readable filed return).
+        if self._open_tile_action(self.GSTR1_TILE, ["download"]):
+            messages.append(self._download_here(
+                "GSTR-1", period_label, folders["GSTR-1"],
+                ["generate json file to download", "generate file to download",
+                 "download json", "generate json"],
+                kind="json", generated=True,
+            ))
+        else:
+            messages.append(f"GSTR-1 JSON {period_label}: DOWNLOAD action not available on the tile")
+        self._return_to_monthly_tiles(results_url)
+
+        # 2. VIEW → the GSTR-1 detail page carries the e-invoice Excel export…
+        if not self._open_tile_action(self.GSTR1_TILE, ["view summary", "view"]):
+            messages.append(f"E-Invoice {period_label}: GSTR-1 VIEW action not available")
+            messages.append(f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available")
+            return messages
+        messages.append(self._download_here(
+            "E-Invoice", period_label, folders["E-Invoice"],
+            ["download details from e-invoices (excel)",
+             "download details from e-invoice (excel)",
+             "download e-invoice details", "e-invoice download"],
+            timeout=90,
+        ))
+
+        # 3. …and VIEW SUMMARY from there opens the page holding the summary PDF.
+        if self._click_exact_button(["view summary"]):
+            time.sleep(4)
+            self.dismiss_post_login_prompts(timeout=2)
+        messages.append(self._download_here(
+            "GSTR-1", period_label, folders["GSTR-1"],
+            ["download summary (pdf)", "download (pdf)", "download pdf",
+             "download summary", "preview gstr-1 (pdf)"],
+            kind="pdf", timeout=90,
+        ))
+        self._return_to_monthly_tiles(results_url)
+        return messages
+
+    def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
+        """GSTR-3B tile: VIEW GSTR3B, close the system-generated popup, take the filed PDF."""
+        if not self._open_tile_action(self.GSTR3B_TILE, ["view gstr3b", "view gstr-3b", "view"]):
+            return [f"GSTR-3B {period_label}: VIEW action not available"]
+        # A "system generated GSTR-3B" dialog can sit in front of the summary.
+        self._wait_and_click_text(["close"], timeout=8)
+        message = self._download_here(
+            "GSTR-3B", period_label, folder,
+            ["download filed gstr-3b (pdf)", "download filed gstr-3b", "download filed gstr3b",
+             "download gstr-3b (pdf)", "download (pdf)", "download pdf"],
+            kind="pdf", timeout=90,
         )
-        # A generated file may appear as a separate link after GSTN processes it.
-        self._wait_and_click_text(["click here to download", "download generated file"], timeout=15)
-        downloaded = self._wait_for_download(folder, before)
-        if downloaded is None:
-            return f"{report} {period_label}: request submitted; file not ready within 120 seconds"
-        safe_report = report.replace("-", "")
-        renamed = downloaded.with_name(f"{period_label}_{safe_report}_{downloaded.name}")
-        if renamed != downloaded and not renamed.exists():
-            downloaded.rename(renamed)
-            downloaded = renamed
-        return f"{report} {period_label}: {downloaded.name}"
+        self._return_to_monthly_tiles(results_url)
+        return [message]
+
+    def _download_gstr2b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
+        """GSTR-2B tile: DOWNLOAD → GENERATE EXCEL FILE TO DOWNLOAD."""
+        if not self._open_tile_action(self.GSTR2B_TILE, ["download", "view"]):
+            return [f"GSTR-2B {period_label}: DOWNLOAD action not available"]
+        message = self._download_here(
+            "GSTR-2B", period_label, folder,
+            ["generate excel file to download", "download gstr-2b details (excel)",
+             "download excel", "generate excel"],
+            kind="excel", generated=True,
+        )
+        self._return_to_monthly_tiles(results_url)
+        return [message]
 
     def download_financial_year(self, credential: GstCredential, financial_year: str,
                                 progress: Callable[[int, str], None] | None = None) -> dict[str, object]:
         """Download all available monthly GST returns after the user has logged in."""
         if not self.is_logged_in():
             raise RuntimeError("Complete CAPTCHA/OTP and click Login before starting automatic downloads.")
-        root = self.download_dir / self._safe_name(credential.label) / financial_year
-        report_folders = {name: root / name for name in ("GSTR-1", "GSTR-3B", "GSTR-2B", "E-Invoice")}
+        root = self.resolve_client_root(self.download_dir, credential.label, financial_year)
+        report_folders = {name: root / name for name in REPORT_FOLDERS}
         for folder in report_folders.values():
             folder.mkdir(parents=True, exist_ok=True)
         results: list[str] = []
         periods = financial_year_periods(financial_year)
-        total = len(periods) * 4
+        steps_per_period = 5
+        total = len(periods) * steps_per_period
         completed = 0
-        jobs = (
-            ("GSTR-3B", ["monthly return gstr-3b", "gstr-3b"], ["view gstr3b", "view"],
-             ["download filed gstr-3b"], True),
-            ("GSTR-2B", ["auto-drafted itc statement", "gstr-2b"], ["view"],
-             ["download gstr-2b details (excel)"], False),
-        )
+
+        def report(message: str, count: int = 1) -> None:
+            nonlocal completed
+            completed += count
+            if progress:
+                progress(min(100, int(completed * 100 / total)), message)
+
         for month, quarter, period_label in periods:
             try:
                 if progress:
-                    progress(int(completed * 100 / total),
+                    progress(min(100, int(completed * 100 / total)),
                              f"{period_label}: selecting FY, Quarter {quarter}, {month}, then SEARCH…")
                 self._prepare_period(financial_year, quarter, month)
             except Exception as exc:
                 message = f"{period_label}: dashboard preparation failed: {exc}"
-                results.extend([message] * 4)
-                completed += 4
-                if progress:
-                    progress(int(completed * 100 / total), message)
+                results.extend([message] * steps_per_period)
+                report(message, steps_per_period)
                 continue
 
-            # GSTR-1 requires two levels: VIEW opens its details dashboard,
-            # where e-invoice Excel is downloaded; VIEW SUMMARY then opens the
-            # summary page containing DOWNLOAD(PDF).
-            gstr1_tile_labels = ["details of outward supplies", "gstr-1"]
-            try:
+            jobs = (
+                ("GSTR-1 / E-Invoice", 3,
+                 lambda label, url: self._download_gstr1_group(label, report_folders, url)),
+                ("GSTR-3B", 1,
+                 lambda label, url: self._download_gstr3b(label, report_folders["GSTR-3B"], url)),
+                ("GSTR-2B", 1,
+                 lambda label, url: self._download_gstr2b(label, report_folders["GSTR-2B"], url)),
+            )
+            for name, weight, runner in jobs:
                 if progress:
-                    progress(int(completed * 100 / total),
-                             f"GSTR-1 {period_label}: clicking VIEW and opening the summary…")
-                results_url = self.driver.current_url
-                tile = self._tile(gstr1_tile_labels)
-                if tile is None or not self._click_text(["view summary", "view"], tile):
-                    raise RuntimeError("GSTR-1 VIEW action was not found")
-                time.sleep(4)
-                self.dismiss_post_login_prompts(timeout=2)
-                if progress:
-                    progress(int(completed * 100 / total),
-                             f"E-Invoice {period_label}: downloading Excel before summary…")
-                message = self._download_open_detail(
-                    "E-Invoice", period_label, report_folders["E-Invoice"],
-                    ["download details from e-invoices (excel)",
-                     "download details from e-invoice (excel)"],
-                )
-                results.append(message)
-                completed += 1
-                if progress:
-                    progress(int(completed * 100 / total), message)
-
-                if progress:
-                    progress(int(completed * 100 / total),
-                             f"GSTR-1 {period_label}: clicking VIEW SUMMARY…")
-                if not self._click_exact_button(["view summary"]):
-                    message = f"GSTR-1 {period_label}: VIEW SUMMARY action not available"
-                else:
-                    time.sleep(4)
-                    message = self._download_open_detail(
-                        "GSTR-1", period_label, report_folders["GSTR-1"],
-                        ["download(pdf)", "download (pdf)"],
-                    )
-                results.append(message)
-                completed += 1
-                if progress:
-                    progress(int(completed * 100 / total), message)
-                self._return_to_monthly_tiles(results_url)
-            except Exception as exc:
-                message = f"GSTR-1/E-Invoice {period_label}: download failed: {exc}"
-                results.extend([message, message])
-                completed += 2
-                if progress:
-                    progress(int(completed * 100 / total), message)
-
-            for report, tile_labels, view_labels, download_labels, close_summary in jobs:
+                    progress(min(100, int(completed * 100 / total)),
+                             f"{name} {period_label}: opening the report and downloading…")
                 try:
-                    if progress:
-                        progress(int(completed * 100 / total),
-                                 f"{report} {period_label}: opening report, scrolling down and downloading…")
-                    if self._tile(tile_labels) is None:
+                    if self._tile(self.GSTR1_TILE) is None and self._tile(self.GSTR3B_TILE) is None:
                         self._prepare_period(financial_year, quarter, month)
-                    results_url = self.driver.current_url
-                    message = self._download_from_detail(
-                        report, period_label, report_folders[report], tile_labels,
-                        view_labels, download_labels, close_summary,
-                    )
-                    self._return_to_monthly_tiles(results_url)
+                    messages = runner(period_label, self.driver.current_url)
                 except Exception as exc:
-                    message = f"{report} {period_label}: dashboard/download failed: {exc}"
-                results.append(message)
-                completed += 1
-                if progress:
-                    progress(int(completed * 100 / total), message)
+                    messages = [f"{name} {period_label}: download failed: {exc}"]
+                results.extend(messages)
+                report(messages[-1], weight)
+
         manifest = root / "download_status.txt"
-        manifest.write_text("\n".join(results) + "\n", encoding="utf-8")
+        # Append so a re-run that fills gaps keeps the earlier history.
+        stamp = f"# run {datetime.now():%Y-%m-%d %H:%M:%S} — {financial_year}"
+        with manifest.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join([stamp, *results]) + "\n")
         logged_out = self.logout()
         return {
             "root": str(root),
@@ -555,6 +603,29 @@ class GstBrowserSession:
             "manifest": str(manifest),
             "logged_out": logged_out,
         }
+
+    @classmethod
+    def resolve_client_root(cls, base: str | Path, client: str, financial_year: str) -> Path:
+        """Return ``<base>/<client>/<financial year>`` without re-nesting on re-runs.
+
+        The user can point the tool at the base download folder or at a folder a
+        previous run already created. Any client/financial-year/report segments
+        already at the end of the path are peeled off first, so repeated runs
+        update the same folders instead of burying new ones inside them.
+        """
+        root = Path(base).resolve()
+        safe = cls._safe_name(client)
+        while root.parent != root:
+            name = root.name
+            if name in REPORT_FOLDERS or name == safe or cls._is_financial_year(name):
+                root = root.parent
+                continue
+            break
+        return root / safe / financial_year
+
+    @staticmethod
+    def _is_financial_year(name: str) -> bool:
+        return bool(re.fullmatch(r"\d{4}-\d{2}|\d{4}-\d{4}", name.strip()))
 
     @staticmethod
     def _safe_name(value: str) -> str:

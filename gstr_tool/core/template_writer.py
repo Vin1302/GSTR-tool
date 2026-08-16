@@ -24,21 +24,37 @@ def _get(data: dict[str, TaxAmounts], key: str) -> TaxAmounts:
     return data.get(key, TaxAmounts())
 
 
+def _write_split(sheet, row: int, columns: tuple[int, ...], amounts: TaxAmounts) -> None:
+    """Write IGST/CGST/SGST/CESS into columns that are not adjacent.
+
+    The 3B sheet leaves a spacer column before CESS in its ITC blocks, so the
+    target columns are listed explicitly instead of being offset from a start.
+    """
+    for column, value in zip(columns, (amounts.igst, amounts.cgst, amounts.sgst, amounts.cess)):
+        sheet.cell(row, column).value = _n(value)
+
+
 def _write_3b(sheet, months: dict[str, MonthData]) -> None:
     for row, month in enumerate(MONTHS, start=7):
         data = months.get(month, MonthData()).gstr3b
         outward = _get(data, "outward_nrc")
         non_taxable = _get(data, "non_taxable")
         rcm = _get(data, "outward_rcm")
+        # Rows 7-18: outward supplies and the liability on them.
         sheet.cell(row, 2).value = _n(outward.taxable)
         sheet.cell(row, 3).value = _n(non_taxable.taxable)
         _write_amounts(sheet, row, 6, outward, include_taxable=False)
         sheet.cell(row, 12).value = _n(rcm.taxable)
         _write_amounts(sheet, row, 15, rcm, include_taxable=False)
-        _write_amounts(sheet, row + 17, 2, _get(data, "itc_other"), include_taxable=False)
-        _write_amounts(sheet, row + 17, 6, _get(data, "itc_reversed"), include_taxable=False)
-        _write_amounts(sheet, row + 53, 2, _get(data, "itc_rcm"), include_taxable=False)
-        _write_amounts(sheet, row + 53, 18, _get(data, "late_fee"), include_taxable=False)
+        # Rows 24-35: ITC Eligible (NRC) in B/C/D + F, ITC Reversed in G-J.
+        _write_split(sheet, row + 17, (2, 3, 4, 6), _get(data, "itc_other"))
+        _write_split(sheet, row + 17, (7, 8, 9, 10), _get(data, "itc_reversed"))
+        # Rows 60-71 (row 59 is the opening balance): ITC-RCM in B/C/D + F and
+        # late fees in R/S/T, which has no CESS column.
+        _write_split(sheet, row + 53, (2, 3, 4, 6), _get(data, "itc_rcm"))
+        late_fee = _get(data, "late_fee")
+        for column, value in zip((18, 19, 20), (late_fee.igst, late_fee.cgst, late_fee.sgst)):
+            sheet.cell(row + 53, column).value = _n(value)
 
 
 def _write_einvoice(sheet, months: dict[str, MonthData]) -> None:

@@ -10,11 +10,42 @@ A modular Windows desktop MVP for downloading GST return data with a human-in-th
 4. Files are saved under `<base folder>/<client>/<financial year>/GSTR-1`, `GSTR-3B`, `GSTR-2B`, and `E-Invoice`.
 5. Choose `GSTR template.xlsx` and click **Generate GSTR workbook**.
 
+## What is downloaded for each period
+
+| Report | Portal path | Files kept |
+|---|---|---|
+| GSTR-1 | Tile → **DOWNLOAD** → *Generate JSON file to download* | `<period>_GSTR1_json_*` |
+| GSTR-1 | Tile → **VIEW** → **VIEW SUMMARY** → *Download summary (PDF)* | `<period>_GSTR1_pdf_*` |
+| e-Invoice | GSTR-1 detail page → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
+| GSTR-3B | Tile → **VIEW GSTR3B** → *Download filed GSTR-3B (PDF)* | `<period>_GSTR3B_pdf_*` |
+| GSTR-2B | Tile → **DOWNLOAD** → *Generate excel file to download* | `<period>_GSTR2B_excel_*` |
+
+The GSTR-1 JSON and the GSTR-2B Excel are what the workbook is built from. The
+GSTR-1 summary PDF is kept as the user's copy and is also used as a fallback for
+any month whose JSON the portal did not produce. A filed GSTR-3B has no
+machine-readable download at all, so its PDF is read directly.
+
+## Folder handling on repeated runs
+
+- The client/financial-year folder is resolved from the base folder each time. If
+  the chosen folder is already a client folder, a financial-year folder or one of
+  the four report folders, those segments are peeled off first — a second run
+  updates the same folders instead of nesting new ones inside them.
+- Files already downloaded for a period are skipped, so a re-run only fills the
+  gaps. Clear **Update the existing client folder** to force a fresh download.
+- ZIP archives from GSTN are expanded into a temporary directory during workbook
+  generation, never into the client folder.
+- `download_status.txt` is appended to, with a timestamp per run, so earlier
+  attempts stay readable.
+
 ## Business rules implemented
 
-- e-Invoice rows are included only when status is `Valid` or `Active`; cancelled/invalid rows are skipped.
+- e-Invoice rows are skipped only when GSTN reports them cancelled/invalid; exports without a status column are included in full.
+- e-Invoice invoices, debit notes and credit notes are totalled into their own template columns.
 - GSTR-2B rows are included only when ITC Availability is `Yes`/eligible.
 - GSTR-2B reverse-charge `Yes` and `No` rows are aggregated separately.
+- GSTR-2B credit notes (the `B2B-CDNR` sheets) are stored as negative amounts so they reduce the month's ITC.
+- The GST Portal's own column names (`Integrated Tax(₹)`, `State/UT Tax(₹)`, `Note number`, …) are recognised alongside plain `IGST`/`SGST` headers.
 - Eligible invoice-level 2B rows are written to `Invoice Wise 2B(incl CDNR)`.
 - Only the input tabs are populated: `As per 3B`, `As per E-Invoice`, `As per GSTR 1`, `GSTR 2b`, and the invoice-level 2B tab.
 - All other template sheets and formulas are preserved and Excel is instructed to recalculate on opening.
@@ -29,6 +60,15 @@ python -m gstr_tool.app
 ```
 
 Chrome must be installed. Selenium Manager will select a compatible driver.
+`pdfplumber` is required to read filed GSTR-3B PDFs; without it those periods are
+reported as skipped instead of silently producing empty 3B rows.
+
+Run the tests with the template available:
+
+```bash
+set GSTR_TEMPLATE=C:\path\to\GSTR template.xlsx
+python -m unittest gstr_tool.tests.test_core
+```
 
 ## Standalone Windows application — no Python for end users
 
@@ -73,7 +113,7 @@ Direct GST portal automation starts after the user completes CAPTCHA/OTP and the
 - CAPTCHA, OTP and the final Login click remain manual and are never bypassed.
 - Optional Aadhaar/e-KYC and profile/metadata reminders are dismissed using **Remind me later**; the app never accepts or submits those enrolments.
 - Chrome is minimized after login by default so the download process can run without occupying the user's screen. This can be disabled in the application.
-- After successful GST login, GSTR-1, GSTR-3B and GSTR-2B downloads are automatic for all 12 periods of the selected financial year.
+- After successful GST login, GSTR-1 (JSON + summary PDF), e-Invoice, GSTR-3B (filed PDF) and GSTR-2B (Excel) downloads are automatic for all 12 periods of the selected financial year.
 - The GST Portal can generate some files asynchronously. The app waits up to two minutes for each file and records an unavailable/not-ready status when GSTN has not produced it yet; the user can retry.
 - e-Invoice downloads are taken from the GSTR-1 area of the GST Returns Dashboard and stored in the separate `E-Invoice` folder.
 - Portal selectors are isolated in `core/browser.py` so GSTN UI changes can be updated without changing workbook logic.

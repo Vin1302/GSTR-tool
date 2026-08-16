@@ -2,14 +2,21 @@
 from PyInstaller.utils.hooks import collect_all
 
 
-selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
+datas, binaries, hiddenimports = [], [], []
+# pdfplumber/pdfminer read the filed GSTR-3B PDF, which GSTN offers in no other
+# format, and both load parts of themselves lazily.
+for package in ("selenium", "pdfplumber", "pdfminer"):
+    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
 
 a = Analysis(
     ["run.py"],
     pathex=[".."],
-    binaries=selenium_binaries,
-    datas=selenium_datas,
-    hiddenimports=selenium_hiddenimports,
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

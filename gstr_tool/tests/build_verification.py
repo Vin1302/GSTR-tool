@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -28,5 +30,9 @@ two_b.save(DOWNLOADS / "gstr2b.xlsx")
 (DOWNLOADS / "gstr3b.json").write_text(json.dumps({"ret_period": "042025", "sup_details": {"osup_det": {"txval": 2000, "iamt": 360}}, "itc_elg": {"itc_avl": [{"ty": "OTH", "iamt": 90}]}}))
 (DOWNLOADS / "gstr1.json").write_text(json.dumps({"fp": "042025", "b2b": [{"inv": [{"inum": "S-1", "idt": "10-04-2025", "itms": [{"itm_det": {"txval": 1500, "iamt": 270}}]}]}]}))
 
-result = run("/Users/vineetgarg/Downloads/GSTR template.xlsx", str(DOWNLOADS), str(ROOT))
+template = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("GSTR_TEMPLATE", "")
+if not template:
+    raise SystemExit("Pass the GSTR template path as an argument or set GSTR_TEMPLATE.")
+
+result = run(template, str(DOWNLOADS), str(ROOT))
 print(result["output"])

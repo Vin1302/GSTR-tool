@@ -110,6 +110,9 @@ class MainWindow(QWidget):
         self.background_checkbox = QCheckBox("Keep Chrome in a compact background window")
         self.background_checkbox.setChecked(False)
         login_form.addRow(self.background_checkbox)
+        self.skip_existing_checkbox = QCheckBox("Update the existing client folder — skip files already downloaded")
+        self.skip_existing_checkbox.setChecked(True)
+        login_form.addRow(self.skip_existing_checkbox)
         self.financial_year_combo = QComboBox()
         current_start = date.today().year if date.today().month >= 4 else date.today().year - 1
         for start_year in range(current_start, 2016, -1):
@@ -173,7 +176,10 @@ class MainWindow(QWidget):
             if not self.download_path.text(): return
         try:
             if self.browser_session: self.browser_session.close()
-            self.browser_session = GstBrowserSession(self.download_path.text())
+            self.browser_session = GstBrowserSession(
+                self.download_path.text(),
+                skip_existing=self.skip_existing_checkbox.isChecked(),
+            )
             self.browser_session.open_login(self.credentials[self.client_combo.currentIndex()])
             self.login_watcher.start()
             self.status.setText("GST login is ready. Complete CAPTCHA/OTP and click Login. The app will dismiss optional reminders and start automatically.")
@@ -184,7 +190,7 @@ class MainWindow(QWidget):
         try:
             if not self.browser_session: raise RuntimeError("Open GST login first.")
             self.browser_session.open_returns_dashboard()
-            self.status.setText("Returns Dashboard opened. Select the FY/period and download GSTR-1, GSTR-3B and GSTR-2B; download valid e-Invoices from the e-Invoice portal into the same folder.")
+            self.status.setText("Returns Dashboard opened. Use 'Download complete selected financial year' to collect the GSTR-1 JSON and summary PDF, the e-Invoice Excel, the filed GSTR-3B PDF and the GSTR-2B Excel for every period.")
         except Exception as exc:
             QMessageBox.warning(self, "Login not complete", str(exc))
 
@@ -213,6 +219,7 @@ class MainWindow(QWidget):
         financial_year = self.financial_year_combo.currentText()
         self._download_active = True
         self.login_watcher.stop()
+        self.browser_session.skip_existing = self.skip_existing_checkbox.isChecked()
         try:
             self.browser_session.dismiss_post_login_prompts()
             if self.background_checkbox.isChecked():
@@ -241,8 +248,10 @@ class MainWindow(QWidget):
     def download_done(self, result):
         self._download_active = False
         self.progress.hide(); self.download_all_button.setEnabled(True)
+        # Point step 2 at the client/financial-year folder. Re-running a download
+        # from here reuses the same folders instead of nesting new ones.
         self.download_path.setText(result["root"])
-        failure_terms = ("not available", "not ready", "not arrive", "not found", "failed", "error")
+        failure_terms = ("not available", "not ready", "was not ready", "not found", "failed", "error")
         unavailable = [message for message in result["results"]
                        if any(term in message.lower() for term in failure_terms)]
         message = f"Automatic GST download completed. Files are separated under {result['root']}."
