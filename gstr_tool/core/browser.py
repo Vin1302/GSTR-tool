@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +49,10 @@ class GstBrowserSession:
         self.download_dir = Path(download_dir).resolve()
         self.skip_existing = skip_existing
         self.driver = None
+        # Set for the duration of a download run; see download_financial_year.
+        self.staging = self.download_dir
+        self._report_folders: dict[str, Path] = {}
+        self._staged_before: set[Path] = set()
 
     def open_login(self, credential: GstCredential) -> None:
         try:
@@ -403,50 +409,154 @@ class GstBrowserSession:
                 return path
         return None
 
-    def _store(self, downloaded: Path, report: str, period_label: str, kind: str = "") -> Path:
-        """Rename a fresh download so period, report and file kind stay obvious."""
-        prefix = self._stored_name(report, period_label) + (f"{kind}_" if kind else "")
-        if downloaded.name.startswith(prefix):
-            return downloaded
-        target = downloaded.with_name(prefix + downloaded.name)
-        counter = 2
-        while target.exists():
-            target = downloaded.with_name(f"{prefix}{counter}_{downloaded.name}")
-            counter += 1
-        downloaded.rename(target)
-        return target
+    # Every download lands in one staging folder and is then filed deliberately.
+    # Chrome's download directory is never switched mid-run, so a file GSTN
+    # delivers late can no longer drop into whichever report folder happens to
+    # be current — the cause of stray Excel files appearing under GSTR-1.
+    def _settle(self, timeout: int = 30) -> None:
+        """Wait for any download still in flight to finish writing."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not (list(self.staging.glob("*.crdownload")) + list(self.staging.glob("*.tmp"))):
+                return
+            time.sleep(1)
 
-    def _download_here(self, report: str, period_label: str, folder: Path,
-                       download_labels: list[str], *, kind: str = "",
-                       generated: bool = False, timeout: int = 120) -> str:
-        """Click a download control on the page that is already open and keep the file.
+    def sweep_staging(self) -> list[str]:
+        """File anything left in staging by name, so no download is ever lost."""
+        filed: list[str] = []
+        for path in self._snapshot(self.staging):
+            report = self._guess_report(path.name)
+            target = self._report_folders.get(report or "", self.staging)
+            if target == self.staging:
+                continue
+            destination = target / path.name
+            counter = 2
+            while destination.exists():
+                destination = target / f"{destination.stem}_{counter}{path.suffix}"
+                counter += 1
+            path.rename(destination)
+            filed.append(f"{report}: filed stray download {destination.name}")
+        return filed
 
-        ``generated`` covers the GST Portal pattern where the first click only asks
-        GSTN to build the file and a second link appears once it is ready.
-        """
-        label = f"{report}{' ' + kind.upper() if kind else ''} {period_label}"
-        if self.skip_existing:
-            existing = self._existing_download(folder, report, period_label, kind)
-            if existing is not None:
-                return f"{label}: already downloaded ({existing.name})"
-        self._set_download_directory(folder)
-        before = self._snapshot(folder)
-        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
-        if not self._wait_and_click_text(download_labels, timeout=25):
-            return f"{label}: download action not available on this page"
+    @staticmethod
+    def _guess_report(name: str) -> str:
+        squashed = name.lower().replace(" ", "").replace("_", "").replace("-", "")
+        for token, report in (("einvoice", "E-Invoice"), ("irn", "E-Invoice"),
+                              ("gstr2b", "GSTR-2B"), ("2b", "GSTR-2B"),
+                              ("gstr3b", "GSTR-3B"), ("3b", "GSTR-3B"),
+                              ("gstr1", "GSTR-1"), ("r1", "GSTR-1")):
+            if token in squashed:
+                return report
+        return ""
+
+    def _collect(self, report: str, period_label: str, folder: Path, label: str, *,
+                 kind: str = "", generated: bool = False, timeout: int = 120) -> str:
+        """Wait for the file a click started, then move it into its report folder."""
+        before = self._staged_before
         if generated:
-            # GSTN builds the archive asynchronously and then shows a second link.
+            # GSTN builds the file asynchronously and then shows a second link.
             # Some periods download straight away, so a missing link is not an
             # error — the file wait below decides the outcome either way.
             self._wait_and_click_text(
                 ["click here to download", "download generated file", "generated file"],
                 timeout=60,
             )
-        downloaded = self._wait_for_download(folder, before, timeout=timeout)
+        downloaded = self._wait_for_download(self.staging, before, timeout=timeout)
         if downloaded is None:
             return f"{label}: file was not ready within {timeout} seconds"
-        return f"{label}: {self._store(downloaded, report, period_label, kind).name}"
+        self._settle(timeout=20)
+        prefix = self._stored_name(report, period_label) + (f"{kind}_" if kind else "")
+        destination = folder / (prefix + downloaded.name)
+        counter = 2
+        while destination.exists():
+            destination = folder / f"{prefix}{counter}_{downloaded.name}"
+            counter += 1
+        folder.mkdir(parents=True, exist_ok=True)
+        downloaded.rename(destination)
+        return f"{label}: {destination.name}"
+
+    def _prepare_click(self) -> None:
+        """Clear staging of earlier arrivals so the next file is unambiguous."""
+        self._settle(timeout=20)
+        self.sweep_staging()
+        self._staged_before = self._snapshot(self.staging)
+
+    def _download_here(self, report: str, period_label: str, folder: Path,
+                       download_labels: list[str], *, kind: str = "",
+                       generated: bool = False, timeout: int = 120) -> str:
+        """Click a download control on the page that is already open and keep the file."""
+        label = f"{report}{' ' + kind.upper() if kind else ''} {period_label}"
+        if self.skip_existing:
+            existing = self._existing_download(folder, report, period_label, kind)
+            if existing is not None:
+                return f"{label}: already downloaded ({existing.name})"
+        self._prepare_click()
+        self._scroll_to_bottom()
+        if not self._wait_and_click_text(download_labels, timeout=25):
+            return f"{label}: download action not available on this page"
+        return self._collect(report, period_label, folder, label,
+                             kind=kind, generated=generated, timeout=timeout)
+
+    def _download_from_tile(self, report: str, period_label: str, folder: Path,
+                            tile_labels: list[str], download_labels: list[str],
+                            enter_labels: list[str], *, kind: str = "",
+                            generated: bool = False, timeout: int = 120) -> str:
+        """Take a report's download whether its button is on the tile or one page in.
+
+        The GSTR-3B tile carries DOWNLOAD FILED GSTR-3B itself, while GSTR-2B
+        opens a page whose generate/download control sits further down. The tile
+        is tried first, then the page, so both portal layouts work. Entering is
+        matched on the button's whole text so a bare DOWNLOAD is never confused
+        with "Generate JSON file to download".
+        """
+        label = f"{report}{' ' + kind.upper() if kind else ''} {period_label}"
+        if self.skip_existing:
+            existing = self._existing_download(folder, report, period_label, kind)
+            if existing is not None:
+                return f"{label}: already downloaded ({existing.name})"
+        tile = self._tile(tile_labels)
+        if tile is None:
+            return f"{label}: tile not available for this period"
+
+        # 1. The download control may be on the tile itself.
+        self._prepare_click()
+        if self._click_text(download_labels, tile):
+            return self._collect(report, period_label, folder, label,
+                                 kind=kind, generated=generated, timeout=timeout)
+
+        # 2. Otherwise open the tile and look again after scrolling down.
+        if not self._click_exact_in(tile, enter_labels):
+            return f"{label}: no download control on the tile and no way in"
+        time.sleep(4)
+        self.dismiss_post_login_prompts(timeout=2)
+        self._scroll_to_bottom()
+        self._prepare_click()
+        if not self._wait_and_click_text(download_labels, timeout=25):
+            return f"{label}: download action not available on the download page"
+        return self._collect(report, period_label, folder, label,
+                             kind=kind, generated=generated, timeout=timeout)
+
+    def _click_exact_in(self, root, labels: list[str]) -> bool:
+        """Click a button inside ``root`` whose whole text equals one of ``labels``."""
+        from selenium.webdriver.common.by import By
+
+        upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lower = "abcdefghijklmnopqrstuvwxyz"
+        for label in labels:
+            xpath = (
+                ".//*[self::button or self::a or @role='button']"
+                f"[translate(normalize-space(.),'{upper}','{lower}')='{label.lower()}']"
+            )
+            for element in root.find_elements(By.XPATH, xpath):
+                if element.is_displayed() and element.is_enabled():
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+                    time.sleep(0.3)
+                    try:
+                        element.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", element)
+                    return True
+        return False
 
     def _open_tile_action(self, tile_labels: list[str], action_labels: list[str]) -> bool:
         """Click an action button inside a Returns Dashboard tile."""
@@ -541,42 +651,46 @@ class GstBrowserSession:
                 ["view summary"], timeout=10):
             time.sleep(4)
             self.dismiss_post_login_prompts(timeout=2)
+        # PDF spellings only. A bare "download summary" also matches the portal's
+        # DOWNLOAD SUMMARY (EXCEL) button, which was landing an unwanted Excel
+        # file in the GSTR-1 folder.
         messages.append(self._download_here(
             "GSTR-1", period_label, folders["GSTR-1"],
-            ["download summary (pdf)", "download (pdf)", "download pdf",
-             "download summary", "preview gstr-1 (pdf)"],
+            ["download summary (pdf)", "download (pdf)", "download pdf"],
             kind="pdf", timeout=90,
         ))
         self._return_to_monthly_tiles(results_url)
         return messages
 
+    # "DOWNLOAD FILED GSTR-3B" sits on the tile beside "View GSTR-3B" and starts
+    # the PDF itself, so it is a download control rather than a way in.
     GSTR3B_DOWNLOAD_LABELS = ["download filed gstr-3b (pdf)", "download filed gstr-3b",
-                              "download filed gstr3b", "generate pdf file to download",
-                              "generate excel file to download", "generate file to download",
-                              "download gstr-3b (pdf)", "download (pdf)", "download pdf"]
+                              "download filed gstr3b", "download filed gstr 3b",
+                              "gstr-3b filed", "download (pdf)", "download pdf"]
+    # GSTR-2B offers "GENERATE EXCEL FILE TO DOWNLOAD" until GSTN has built the
+    # file, after which the same control reads "DOWNLOAD EXCEL". Excel spellings
+    # only — the JSON button also ends in the word "download".
+    GSTR2B_DOWNLOAD_LABELS = ["generate excel file to download", "download excel file",
+                              "download gstr-2b details (excel)", "download excel",
+                              "generate excel"]
 
     def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
-        """GSTR-3B tile: DOWNLOAD, then the generate control on the download page.
-
-        The PDF spellings are listed first because the reconciliation workbook
-        reads the filed PDF — GSTN publishes no machine-readable filed GSTR-3B.
-        """
-        if not self._open_tile_action(self.GSTR3B_TILE, ["download"]):
-            return [f"GSTR-3B {period_label}: DOWNLOAD action not available on the tile"]
-        message = self._download_here(
-            "GSTR-3B", period_label, folder, self.GSTR3B_DOWNLOAD_LABELS, generated=True,
+        """GSTR-3B: DOWNLOAD FILED GSTR-3B, on the tile or inside VIEW GSTR3B."""
+        message = self._download_from_tile(
+            "GSTR-3B", period_label, folder, self.GSTR3B_TILE,
+            self.GSTR3B_DOWNLOAD_LABELS,
+            enter_labels=["view gstr3b", "view gstr-3b", "download", "view"],
+            timeout=90,
         )
         self._return_to_monthly_tiles(results_url)
         return [message]
 
     def _download_gstr2b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
-        """GSTR-2B tile: DOWNLOAD → GENERATE EXCEL FILE TO DOWNLOAD."""
-        if not self._open_tile_action(self.GSTR2B_TILE, ["download"]):
-            return [f"GSTR-2B {period_label}: DOWNLOAD action not available on the tile"]
-        message = self._download_here(
-            "GSTR-2B", period_label, folder,
-            ["generate excel file to download", "download gstr-2b details (excel)",
-             "download excel", "generate excel"],
+        """GSTR-2B: open the tile, scroll down, take the Excel."""
+        message = self._download_from_tile(
+            "GSTR-2B", period_label, folder, self.GSTR2B_TILE,
+            self.GSTR2B_DOWNLOAD_LABELS,
+            enter_labels=["download", "view"],
             kind="excel", generated=True,
         )
         self._return_to_monthly_tiles(results_url)
@@ -591,6 +705,13 @@ class GstBrowserSession:
         report_folders = {name: root / name for name in REPORT_FOLDERS}
         for folder in report_folders.values():
             folder.mkdir(parents=True, exist_ok=True)
+        # Chrome downloads into a scratch folder for the whole run; each file is
+        # then moved into its report folder once it is known which step produced
+        # it. Set once, never switched, so late arrivals cannot be misfiled.
+        self.staging = Path(tempfile.mkdtemp(prefix="gstr_download_"))
+        self._report_folders = report_folders
+        self._staged_before = set()
+        self._set_download_directory(self.staging)
         results: list[str] = []
         periods = financial_year_periods(financial_year)
         steps_per_period = 4
@@ -635,6 +756,12 @@ class GstBrowserSession:
                     messages = [f"{name} {period_label}: download failed: {exc}"]
                 results.extend(messages)
                 report(messages[-1], weight)
+
+        # Nothing GSTN delivered late is thrown away: whatever is still in
+        # staging is filed by name before the scratch folder goes.
+        self._settle(timeout=30)
+        results.extend(self.sweep_staging())
+        shutil.rmtree(self.staging, ignore_errors=True)
 
         manifest = root / "download_status.txt"
         # Append so a re-run that fills gaps keeps the earlier history.

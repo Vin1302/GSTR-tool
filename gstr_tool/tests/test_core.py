@@ -146,6 +146,37 @@ class GstrToolTests(unittest.TestCase):
             self.assertIsNotNone(found)
             self.assertIsNone(session._existing_download(report_folder, "GSTR-2B", "May-2025", "excel"))
 
+    def test_stray_downloads_are_filed_by_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            session = GstBrowserSession(root)
+            session.staging = root / "staging"
+            session.staging.mkdir()
+            session._report_folders = {name: root / name for name in
+                                       ("GSTR-1", "GSTR-3B", "GSTR-2B", "E-Invoice")}
+            for target in session._report_folders.values():
+                target.mkdir()
+            # A file GSTN delivered after its step had moved on.
+            (session.staging / "einvoice_details_042025.xlsx").write_text("x")
+            (session.staging / "GSTR2B_042025.xlsx").write_text("x")
+            (session.staging / "unknown_thing.txt").write_text("x")
+
+            filed = session.sweep_staging()
+
+            self.assertEqual(len(filed), 2)
+            self.assertTrue((root / "E-Invoice" / "einvoice_details_042025.xlsx").exists())
+            self.assertTrue((root / "GSTR-2B" / "GSTR2B_042025.xlsx").exists())
+            # Anything unrecognised stays put rather than being filed wrongly.
+            self.assertTrue((session.staging / "unknown_thing.txt").exists())
+
+    def test_report_is_guessed_from_the_portal_file_name(self):
+        guess = GstBrowserSession._guess_report
+        self.assertEqual(guess("einvoice_042025.xlsx"), "E-Invoice")
+        self.assertEqual(guess("GSTR-2B_19ABCDE1234F1Z5_042025.xlsx"), "GSTR-2B")
+        self.assertEqual(guess("GSTR3B_19ABCDE1234F1Z5_042025.pdf"), "GSTR-3B")
+        self.assertEqual(guess("GSTR1_Summary_042025.pdf"), "GSTR-1")
+        self.assertEqual(guess("statement.csv"), "")
+
     def test_gstr3b_pdf_text_buckets(self):
         buckets = parse_gstr3b_text(GSTR3B_TEXT)
         self.assertEqual(float(buckets["outward_nrc"].taxable), 2000)

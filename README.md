@@ -18,13 +18,29 @@ period is worked in this order:
 | Step | Portal path | File kept |
 |---|---|---|
 | 1. e-Invoice | GSTR-1 tile → **VIEW** → scroll down → **VIEW INVOICES** → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
-| 2. GSTR-1 | back on the GSTR-1 page → **VIEW SUMMARY** → *Download summary (PDF)* | `<period>_GSTR1_pdf_*` |
-| 3. GSTR-3B | Tile → **DOWNLOAD** → *generate/download the filed return* | `<period>_GSTR3B_*` |
-| 4. GSTR-2B | Tile → **DOWNLOAD** → *Generate excel file to download* | `<period>_GSTR2B_excel_*` |
+| 2. GSTR-1 | back on the GSTR-1 page → **VIEW SUMMARY** → *DOWNLOAD SUMMARY (PDF)* | `<period>_GSTR1_pdf_*` |
+| 3. GSTR-3B | Tile → **DOWNLOAD FILED GSTR-3B**, which sits beside *View GSTR-3B* | `<period>_GSTR3B_*` |
+| 4. GSTR-2B | Tile → **DOWNLOAD** → scroll down → *GENERATE EXCEL FILE TO DOWNLOAD* (reads *DOWNLOAD EXCEL* once GSTN has built it) | `<period>_GSTR2B_excel_*` |
 
-Each report is fetched by exactly one route; nothing else is downloaded. A step
-that finds no matching button records the reason in `download_status.txt` and the
-run moves on to the next report.
+Exactly one file is taken per report. Only PDF spellings are accepted for GSTR-1,
+because a bare "download summary" also matches the portal's DOWNLOAD SUMMARY
+(EXCEL) button; only Excel spellings are accepted for GSTR-2B, because the JSON
+button's text also ends in the word "download".
+
+For GSTR-3B and GSTR-2B the download control is looked for on the tile first and
+then, if it is not there, on the page the tile opens — the two reports place it
+differently, and GSTN has moved it between releases. A step that finds no
+matching button records the reason in `download_status.txt` and the run
+continues with the next report.
+
+### Where downloads land
+
+Chrome is pointed at one scratch folder for the whole run, and each file is moved
+into its report folder once the step that produced it has finished. The download
+directory is never switched mid-run, so a file GSTN delivers late cannot drop
+into whichever report folder happens to be current. Anything still in the scratch
+folder at the end is filed by matching its name (`einvoice`, `gstr2b`, `gstr3b`,
+`gstr1`), and every such rescue is listed in `download_status.txt`.
 
 The GSTR-2B Excel and the e-Invoice Excel are read directly. GSTR-1 and GSTR-3B
 are only published as PDFs on these routes, so both are read with the PDF reader
