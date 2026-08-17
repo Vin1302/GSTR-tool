@@ -53,6 +53,7 @@ class GstBrowserSession:
         self.staging = self.download_dir
         self._report_folders: dict[str, Path] = {}
         self._staged_before: set[Path] = set()
+        self._fallback_before: set[Path] = set()
 
     def open_login(self, credential: GstCredential) -> None:
         try:
@@ -150,11 +151,28 @@ class GstBrowserSession:
                 self.driver.set_window_position(0, 0)
 
     def _set_download_directory(self, folder: Path) -> None:
+        """Point Chrome at ``folder``, browser-wide and for the current page.
+
+        ``Page.setDownloadBehavior`` is deprecated and scoped to one page, so it
+        stops applying after a navigation. ``Browser.setDownloadBehavior`` is
+        browser-wide and survives, but is missing on older builds, so both are
+        sent and this is re-asserted before every download.
+        """
         folder.mkdir(parents=True, exist_ok=True)
-        self.driver.execute_cdp_cmd("Page.setDownloadBehavior", {
-            "behavior": "allow",
-            "downloadPath": str(folder.resolve()),
-        })
+        target = str(folder.resolve())
+        delivered = False
+        for command, params in (
+            ("Browser.setDownloadBehavior",
+             {"behavior": "allow", "downloadPath": target, "eventsEnabled": True}),
+            ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": target}),
+        ):
+            try:
+                self.driver.execute_cdp_cmd(command, params)
+                delivered = True
+            except Exception:
+                continue
+        if not delivered:
+            LOG.warning("Chrome refused the download directory; using its default")
 
     def _select(self, candidates: list[str], *, text: str | None = None,
                 value: str | None = None) -> None:
@@ -417,7 +435,10 @@ class GstBrowserSession:
         """Wait for any download still in flight to finish writing."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not (list(self.staging.glob("*.crdownload")) + list(self.staging.glob("*.tmp"))):
+            partial = []
+            for folder in {self.staging, self.download_dir}:
+                partial += list(folder.glob("*.crdownload")) + list(folder.glob("*.tmp"))
+            if not partial:
                 return
             time.sleep(1)
 
@@ -463,6 +484,11 @@ class GstBrowserSession:
             )
         downloaded = self._wait_for_download(self.staging, before, timeout=timeout)
         if downloaded is None:
+            # If Chrome ignored the requested directory the file is still on
+            # disk, in its own default folder. Claim it rather than lose it.
+            downloaded = self._wait_for_download(
+                self.download_dir, self._fallback_before, timeout=10)
+        if downloaded is None:
             return f"{label}: file was not ready within {timeout} seconds"
         self._settle(timeout=20)
         prefix = self._stored_name(report, period_label) + (f"{kind}_" if kind else "")
@@ -476,10 +502,17 @@ class GstBrowserSession:
         return f"{label}: {destination.name}"
 
     def _prepare_click(self) -> None:
-        """Clear staging of earlier arrivals so the next file is unambiguous."""
+        """Re-point Chrome at staging and note what is there before the click.
+
+        The download directory is re-asserted every time because a page
+        navigation can drop the setting, which silently sends files to Chrome's
+        own default folder.
+        """
         self._settle(timeout=20)
         self.sweep_staging()
+        self._set_download_directory(self.staging)
         self._staged_before = self._snapshot(self.staging)
+        self._fallback_before = self._snapshot(self.download_dir)
 
     def _download_here(self, report: str, period_label: str, folder: Path,
                        download_labels: list[str], *, kind: str = "",

@@ -169,6 +169,34 @@ class GstrToolTests(unittest.TestCase):
             # Anything unrecognised stays put rather than being filed wrongly.
             self.assertTrue((session.staging / "unknown_thing.txt").exists())
 
+    def test_download_directory_is_reasserted_before_every_click(self):
+        """A page navigation can drop Chrome's download directory.
+
+        Setting it once per run silently sent every file to Chrome's own
+        default folder, where nothing was watching for it.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            session = GstBrowserSession(root)
+            session.staging = root / "staging"
+            session.staging.mkdir()
+            session._report_folders = {}
+            sent = []
+
+            class FakeDriver:
+                def execute_cdp_cmd(self, command, params):
+                    sent.append((command, params["downloadPath"]))
+
+            session.driver = FakeDriver()
+            session._prepare_click()
+            session._prepare_click()
+
+            commands = [command for command, _ in sent]
+            self.assertIn("Browser.setDownloadBehavior", commands)
+            # Once per click, not once per run.
+            self.assertEqual(commands.count("Browser.setDownloadBehavior"), 2)
+            self.assertTrue(all(path == str(session.staging.resolve()) for _, path in sent))
+
     def test_report_is_guessed_from_the_portal_file_name(self):
         guess = GstBrowserSession._guess_report
         self.assertEqual(guess("einvoice_042025.xlsx"), "E-Invoice")
