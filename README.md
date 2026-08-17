@@ -19,7 +19,7 @@ period is worked in this order:
 |---|---|---|
 | 1. e-Invoice | GSTR-1 tile → **VIEW** → scroll down → **VIEW INVOICES** → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
 | 2. GSTR-1 | back on the GSTR-1 page → **VIEW SUMMARY** → *DOWNLOAD SUMMARY (PDF)* | `<period>_GSTR1_pdf_*` |
-| 3. GSTR-3B | Tile → **DOWNLOAD FILED GSTR-3B**, which sits beside *View GSTR-3B* | `<period>_GSTR3B_*` |
+| 3. GSTR-3B | Tile → **VIEW GSTR3B** → scroll down → *DOWNLOAD FILED GSTR-3B* | `<period>_GSTR3B_*` |
 | 4. GSTR-2B | Tile → **DOWNLOAD** → scroll down → *GENERATE EXCEL FILE TO DOWNLOAD* (reads *DOWNLOAD EXCEL* once GSTN has built it) | `<period>_GSTR2B_excel_*` |
 
 Exactly one file is taken per report. Only PDF spellings are accepted for GSTR-1,
@@ -27,10 +27,11 @@ because a bare "download summary" also matches the portal's DOWNLOAD SUMMARY
 (EXCEL) button; only Excel spellings are accepted for GSTR-2B, because the JSON
 button's text also ends in the word "download".
 
-For GSTR-3B and GSTR-2B the download control is looked for on the tile first and
-then, if it is not there, on the page the tile opens — the two reports place it
-differently, and GSTN has moved it between releases. A step that finds no
-matching button records the reason in `download_status.txt` and the run
+Downloads are always taken from inside the report, never from a button on the
+tile itself. Tile buttons are only used to open the report, and the word
+"download" is matched there on the button's whole text, so a tile control such as
+"Generate JSON file to download" can never be clicked by mistake. A step that
+finds no matching button records the reason in `download_status.txt` and the run
 continues with the next report.
 
 ### Where downloads land

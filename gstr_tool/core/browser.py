@@ -497,17 +497,19 @@ class GstBrowserSession:
         return self._collect(report, period_label, folder, label,
                              kind=kind, generated=generated, timeout=timeout)
 
-    def _download_from_tile(self, report: str, period_label: str, folder: Path,
-                            tile_labels: list[str], download_labels: list[str],
-                            enter_labels: list[str], *, kind: str = "",
-                            generated: bool = False, timeout: int = 120) -> str:
-        """Take a report's download whether its button is on the tile or one page in.
+    def _download_inside_tile(self, report: str, period_label: str, folder: Path,
+                              tile_labels: list[str], download_labels: list[str],
+                              enter_labels: list[str], *, kind: str = "",
+                              generated: bool = False, timeout: int = 120) -> str:
+        """Open the report from its tile, scroll down, and take the download there.
 
-        The GSTR-3B tile carries DOWNLOAD FILED GSTR-3B itself, while GSTR-2B
-        opens a page whose generate/download control sits further down. The tile
-        is tried first, then the page, so both portal layouts work. Entering is
-        matched on the button's whole text so a bare DOWNLOAD is never confused
-        with "Generate JSON file to download".
+        The tile's own buttons are never used to download. The real control
+        lives on the page the tile opens, and a tile button that merely looks
+        like a download — "Generate JSON file to download" is the trap — costs a
+        page load and fetches the wrong file.
+
+        Entering is matched on the button's whole text first, so a bare DOWNLOAD
+        is never confused with a longer label ending in the same word.
         """
         label = f"{report}{' ' + kind.upper() if kind else ''} {period_label}"
         if self.skip_existing:
@@ -518,21 +520,21 @@ class GstBrowserSession:
         if tile is None:
             return f"{label}: tile not available for this period"
 
-        # 1. The download control may be on the tile itself.
-        self._prepare_click()
-        if self._click_text(download_labels, tile):
-            return self._collect(report, period_label, folder, label,
-                                 kind=kind, generated=generated, timeout=timeout)
-
-        # 2. Otherwise open the tile and look again after scrolling down.
-        if not self._click_exact_in(tile, enter_labels):
-            return f"{label}: no download control on the tile and no way in"
+        # Open the report. "download" is only ever matched exactly, so the
+        # loose second pass cannot hit a generate-JSON style button.
+        opened = self._click_exact_in(tile, enter_labels)
+        if not opened:
+            loose = [item for item in enter_labels if item != "download"]
+            opened = bool(loose) and self._click_text(loose, tile)
+        if not opened:
+            return (f"{label}: could not open the tile "
+                    f"({', '.join(enter_labels)} were not found on it)")
         time.sleep(4)
         self.dismiss_post_login_prompts(timeout=2)
         self._scroll_to_bottom()
         self._prepare_click()
         if not self._wait_and_click_text(download_labels, timeout=25):
-            return f"{label}: download action not available on the download page"
+            return f"{label}: download action not available on the report page"
         return self._collect(report, period_label, folder, label,
                              kind=kind, generated=generated, timeout=timeout)
 
@@ -662,11 +664,9 @@ class GstBrowserSession:
         self._return_to_monthly_tiles(results_url)
         return messages
 
-    # "DOWNLOAD FILED GSTR-3B" sits on the tile beside "View GSTR-3B" and starts
-    # the PDF itself, so it is a download control rather than a way in.
     GSTR3B_DOWNLOAD_LABELS = ["download filed gstr-3b (pdf)", "download filed gstr-3b",
                               "download filed gstr3b", "download filed gstr 3b",
-                              "gstr-3b filed", "download (pdf)", "download pdf"]
+                              "gstr-3b filed", "gstr3b filed", "download (pdf)", "download pdf"]
     # GSTR-2B offers "GENERATE EXCEL FILE TO DOWNLOAD" until GSTN has built the
     # file, after which the same control reads "DOWNLOAD EXCEL". Excel spellings
     # only — the JSON button also ends in the word "download".
@@ -675,8 +675,8 @@ class GstBrowserSession:
                               "generate excel"]
 
     def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
-        """GSTR-3B: DOWNLOAD FILED GSTR-3B, on the tile or inside VIEW GSTR3B."""
-        message = self._download_from_tile(
+        """GSTR-3B: open the tile, then take DOWNLOAD FILED GSTR-3B inside it."""
+        message = self._download_inside_tile(
             "GSTR-3B", period_label, folder, self.GSTR3B_TILE,
             self.GSTR3B_DOWNLOAD_LABELS,
             enter_labels=["view gstr3b", "view gstr-3b", "download", "view"],
@@ -687,7 +687,7 @@ class GstBrowserSession:
 
     def _download_gstr2b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
         """GSTR-2B: open the tile, scroll down, take the Excel."""
-        message = self._download_from_tile(
+        message = self._download_inside_tile(
             "GSTR-2B", period_label, folder, self.GSTR2B_TILE,
             self.GSTR2B_DOWNLOAD_LABELS,
             enter_labels=["download", "view"],
