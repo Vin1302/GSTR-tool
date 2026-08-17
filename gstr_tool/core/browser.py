@@ -700,12 +700,14 @@ class GstBrowserSession:
     GSTR3B_DOWNLOAD_LABELS = ["download filed gstr-3b (pdf)", "download filed gstr-3b",
                               "download filed gstr3b", "download filed gstr 3b",
                               "gstr-3b filed", "gstr3b filed", "download (pdf)", "download pdf"]
-    # GSTR-2B offers "GENERATE EXCEL FILE TO DOWNLOAD" until GSTN has built the
-    # file, after which the same control reads "DOWNLOAD EXCEL". Excel spellings
-    # only — the JSON button also ends in the word "download".
-    GSTR2B_DOWNLOAD_LABELS = ["generate excel file to download", "download excel file",
-                              "download gstr-2b details (excel)", "download excel",
-                              "generate excel"]
+    # GSTR-2B carries "DOWNLOAD GSTR-2B SUMMARY (EXCEL)" on the statement itself
+    # and "GENERATE EXCEL FILE TO DOWNLOAD" on the download page — GSTN disables
+    # the first once a period exceeds 1000 documents and expects the second.
+    # Excel spellings only, and never the bare "download gstr-2b summary", which
+    # would also match the (PDF) button beside it.
+    GSTR2B_DOWNLOAD_LABELS = ["download gstr-2b summary (excel)", "generate excel file to download",
+                              "download gstr-2b details (excel)", "download excel file",
+                              "download excel", "generate excel"]
 
     def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
         """GSTR-3B: open the tile, then take DOWNLOAD FILED GSTR-3B inside it."""
