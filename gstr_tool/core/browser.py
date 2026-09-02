@@ -668,7 +668,8 @@ class GstBrowserSession:
             self.driver.execute_script("arguments[0].click();", element)
 
     def _open_report(self, tile_labels: list[str], action_labels: list[str],
-                     foreign_labels: list[str], unique_labels: list[str] | None = None) -> str:
+                     foreign_labels: list[str], unique_labels: list[str] | None = None,
+                     page_wide: bool = False) -> str:
         """Open one report from the dashboard. Returns the strategy that worked.
 
         Three strategies, most certain first, because the dashboard tiles share
@@ -690,6 +691,10 @@ class GstBrowserSession:
             return "opened from its tile"
         if self._tile_action(tile_labels, action_labels):
             return "opened by position"
+        if page_wide and self._click_text(action_labels):
+            # Only safe where the report's tile is the first on the page, as
+            # GSTR-1's is: a page-wide click takes the first matching button.
+            return "opened page-wide"
         return ""
 
     def _click_scoped_action(self, tile_labels: list[str], action_labels: list[str],
@@ -775,17 +780,6 @@ class GstBrowserSession:
                     return True
         return False
 
-    def _open_tile_action(self, tile_labels: list[str], action_labels: list[str]) -> bool:
-        """Click an action button inside a Returns Dashboard tile."""
-        tile = self._tile(tile_labels)
-        if tile is None:
-            return False
-        if not self._click_text(action_labels, tile):
-            return False
-        time.sleep(4)
-        self.dismiss_post_login_prompts(timeout=2)
-        return True
-
     def _has_button(self, labels: list[str]) -> bool:
         """Report whether a button is on the page without clicking it."""
         from selenium.webdriver.common.by import By
@@ -847,10 +841,18 @@ class GstBrowserSession:
         """
         messages: list[str] = []
 
-        # 1. VIEW on the tile opens the GSTR-1 return.
-        if not self._open_tile_action(self.GSTR1_TILE, ["view"]):
+        # 1. VIEW on the tile opens the GSTR-1 return. This used the same
+        # markup-dependent lookup that broke GSTR-2B and GSTR-3B, and only
+        # worked because GSTR-1 happens to be the first tile on the page.
+        # Scoping it to the tile that names GSTR-1 and no other report makes it
+        # deliberate, with that page-wide click kept as the last resort.
+        if not self._open_report(["details of outward supplies"], ["view"],
+                                 foreign_labels=["gstr-1a", "gstr-2a", "gstr-2b", "gstr-3b"],
+                                 page_wide=True):
             return [f"E-Invoice {period_label}: GSTR-1 VIEW action not available",
                     f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available"]
+        time.sleep(3)
+        self.dismiss_post_login_prompts(timeout=2)
 
         # 2. The e-invoice export sits at the foot of this same page, in the row
         # BACK | DOWNLOAD DETAILS FROM E-INVOICES (EXCEL) | VIEW SUMMARY.

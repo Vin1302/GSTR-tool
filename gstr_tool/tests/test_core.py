@@ -264,6 +264,28 @@ class GstrToolTests(unittest.TestCase):
 
         self.assertTrue(session._monthly_tiles_visible())
 
+    def test_page_wide_click_is_the_last_resort_only(self):
+        """GSTR-1 may click page-wide; the other reports never may.
+
+        A page-wide click takes the first matching button on the page, which
+        belongs to GSTR-1. That is correct for GSTR-1 and wrong for every other
+        report, so it is opt-in rather than a shared fallback.
+        """
+        session = GstBrowserSession("/tmp")
+        session._click_exact_button = lambda labels: False
+        session._click_scoped_action = lambda *a, **k: False
+        session._tile_action = lambda *a, **k: False
+        attempts = []
+        session._click_text = lambda labels, root=None: attempts.append(labels) or True
+
+        self.assertEqual("", session._open_report(["gstr-2b"], ["view"], ["gstr-1"]))
+        self.assertEqual([], attempts, "a non-GSTR-1 report fell back to a page-wide click")
+
+        self.assertEqual("opened page-wide",
+                         session._open_report(["details of outward supplies"], ["view"],
+                                              ["gstr-2b"], page_wide=True))
+        self.assertEqual([["view"]], attempts)
+
     def test_summary_separates_skipped_from_failed(self):
         results = [
             "GSTR-1 PDF Apr-2025: Apr-2025_GSTR1_pdf_x.pdf",
