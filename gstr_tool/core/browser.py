@@ -54,6 +54,7 @@ class GstBrowserSession:
         self._report_folders: dict[str, Path] = {}
         self._staged_before: set[Path] = set()
         self._fallback_before: set[Path] = set()
+        self._swept: list[str] = []
 
     def open_login(self, credential: GstCredential) -> None:
         try:
@@ -352,7 +353,7 @@ class GstBrowserSession:
 
     def _return_to_monthly_tiles(self, results_url: str) -> None:
         """Use GST BACK controls until the selected month's tiles are restored."""
-        monthly_tile_labels = ["monthly return gstr-3b", "auto-drafted itc statement"]
+        monthly_tile_labels = self.GSTR3B_TILE + self.GSTR2B_TILE
         for _ in range(3):
             if self._tile(monthly_tile_labels) is not None:
                 break
@@ -551,7 +552,7 @@ class GstBrowserSession:
         own default folder.
         """
         self._settle(timeout=20)
-        self.sweep_staging()
+        self._swept.extend(self.sweep_staging())
         self._set_download_directory(self.staging)
         self._staged_before = self._snapshot(self.staging)
         self._fallback_before = self._snapshot(self.download_dir)
@@ -591,19 +592,11 @@ class GstBrowserSession:
             existing = self._existing_download(folder, report, period_label, kind)
             if existing is not None:
                 return f"{label}: already downloaded ({existing.name})"
-        tile = self._tile(tile_labels)
-        if tile is None:
+        if self._heading_element(tile_labels) is None:
             return f"{label}: tile not available for this period"
-
-        # Open the report. "download" is only ever matched exactly, so the
-        # loose second pass cannot hit a generate-JSON style button.
-        opened = self._click_exact_in(tile, enter_labels)
-        if not opened:
-            loose = [item for item in enter_labels if item != "download"]
-            opened = bool(loose) and self._click_text(loose, tile)
-        if not opened:
-            return (f"{label}: could not open the tile "
-                    f"({', '.join(enter_labels)} were not found on it)")
+        if not self._tile_action(tile_labels, enter_labels):
+            return (f"{label}: found the tile but none of its buttons matched "
+                    f"({', '.join(enter_labels)})")
         time.sleep(3)
         self.dismiss_post_login_prompts(timeout=2)
         # GSTR-3B opens behind a "System generated summary for GSTR-3B" dialog
@@ -615,6 +608,86 @@ class GstBrowserSession:
             return f"{label}: download action not available on the report page"
         return self._collect(report, period_label, folder, label,
                              kind=kind, generated=generated, timeout=timeout)
+
+    def _heading_element(self, labels: list[str]):
+        """Return the deepest visible element carrying one of ``labels``."""
+        from selenium.webdriver.common.by import By
+
+        upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lower = "abcdefghijklmnopqrstuvwxyz"
+        for label in labels:
+            needle = label.lower()
+            contains = f"contains(translate(normalize-space(.),'{upper}','{lower}'),'{needle}')"
+            for element in self.driver.find_elements(By.XPATH, f"//*[{contains}][not(.//*[{contains}])]"):
+                if element.is_displayed():
+                    return element
+        return None
+
+    def _action_candidates(self, labels: list[str]):
+        """Yield (button, exact) for every visible control matching ``labels``."""
+        from selenium.webdriver.common.by import By
+
+        for element in self.driver.find_elements(
+                By.XPATH, "//button | //a | //*[@role='button'] | //input[@type='submit']"):
+            try:
+                if not (element.is_displayed() and element.is_enabled()):
+                    continue
+                text = " ".join((element.text or element.get_attribute("value") or "").split()).lower()
+            except Exception:
+                continue
+            if not text:
+                continue
+            for label in labels:
+                if label in text:
+                    yield element, text == label
+                    break
+
+    def _click_element(self, element) -> None:
+        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+        time.sleep(0.3)
+        try:
+            element.click()
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", element)
+
+    def _tile_action(self, tile_labels: list[str], action_labels: list[str]) -> bool:
+        """Click the button that visually belongs to a tile's heading.
+
+        The dashboard tiles share no stable DOM shape: walking up from a
+        heading finds either a header block holding no buttons at all, or a
+        wrapper holding every tile — which is how each report ended up driving
+        GSTR-1. The button is therefore chosen the way a person reads it, by
+        position: the nearest match sitting below the heading and overlapping
+        it horizontally.
+        """
+        heading = self._heading_element(tile_labels)
+        if heading is None:
+            return False
+        try:
+            head = heading.rect
+        except Exception:
+            return False
+        best_key = None
+        best_element = None
+        for element, exact in self._action_candidates(action_labels):
+            try:
+                box = element.rect
+            except Exception:
+                continue
+            if box["y"] + box["height"] < head["y"]:
+                continue  # sits above the heading, so belongs to another tile
+            if box["x"] > head["x"] + head["width"] or box["x"] + box["width"] < head["x"]:
+                continue  # no horizontal overlap, so it is a neighbouring tile
+            distance = box["y"] - head["y"]
+            if distance > 500:
+                continue
+            key = (0 if exact else 1, distance)
+            if best_key is None or key < best_key:
+                best_key, best_element = key, element
+        if best_element is None:
+            return False
+        self._click_element(best_element)
+        return True
 
     def _click_exact_in(self, root, labels: list[str]) -> bool:
         """Click a button inside ``root`` whose whole text equals one of ``labels``."""
@@ -715,21 +788,19 @@ class GstBrowserSession:
             return [f"E-Invoice {period_label}: GSTR-1 VIEW action not available",
                     f"GSTR-1 PDF {period_label}: GSTR-1 VIEW action not available"]
 
-        # 2. Scroll down and open VIEW INVOICES, which holds the e-invoice export.
+        # 2. The e-invoice export sits at the foot of this same page, in the row
+        # BACK | DOWNLOAD DETAILS FROM E-INVOICES (EXCEL) | VIEW SUMMARY.
+        # Nothing is clicked before it: an earlier "open the invoices first"
+        # step matched the download button itself on the word "e-invoices",
+        # firing the download early, and the file was then swept away as a
+        # stray before the real click could claim it.
         self._scroll_to_bottom()
-        opened_invoices = self._wait_and_click_text(
-            ["view invoices", "view invoice", "e-invoices", "e-invoice"], timeout=15)
-        if opened_invoices:
-            time.sleep(3)
-            self.dismiss_post_login_prompts(timeout=2)
         messages.append(self._download_here(
             "E-Invoice", period_label, folders["E-Invoice"],
-            self.E_INVOICE_LABELS, timeout=90,
+            self.E_INVOICE_LABELS, timeout=60,
         ))
 
-        # 3. Back on the GSTR-1 page, VIEW SUMMARY opens the page with the PDF.
-        if opened_invoices:
-            self._back_until(["view summary"])
+        # 3. VIEW SUMMARY, on that same row, opens the page holding the PDF.
         if self._click_exact_button(["view summary"]) or self._wait_and_click_text(
                 ["view summary"], timeout=10):
             time.sleep(4)
@@ -797,6 +868,7 @@ class GstBrowserSession:
         self.staging = Path(tempfile.mkdtemp(prefix="gstr_download_"))
         self._report_folders = report_folders
         self._staged_before = set()
+        self._swept = []
         self._set_download_directory(self.staging)
         results: list[str] = []
         periods = financial_year_periods(financial_year)
@@ -846,6 +918,7 @@ class GstBrowserSession:
         # Nothing GSTN delivered late is thrown away: whatever is still in
         # staging is filed by name before the scratch folder goes.
         self._settle(timeout=30)
+        results.extend(self._swept)
         results.extend(self.sweep_staging())
         shutil.rmtree(self.staging, ignore_errors=True)
 

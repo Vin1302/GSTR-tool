@@ -197,6 +197,74 @@ class GstrToolTests(unittest.TestCase):
             self.assertEqual(commands.count("Browser.setDownloadBehavior"), 2)
             self.assertTrue(all(path == str(session.staging.resolve()) for _, path in sent))
 
+    def test_tile_action_picks_the_button_under_its_own_heading(self):
+        """Laid out as the portal lays the dashboard out, from the recording.
+
+        Every report was opening GSTR-1 because the tile lookup returned a
+        container holding all the tiles, whose first button is GSTR-1's. The
+        button is now chosen by position, so GSTR-2B's heading reaches GSTR-2B's
+        VIEW even though three tiles carry a button with that same label.
+        """
+        class FakeButton:
+            def __init__(self, text, x, y):
+                self.text = text
+                self.rect = {"x": x, "y": y, "width": 90, "height": 30}
+
+            def is_displayed(self):
+                return True
+
+            def is_enabled(self):
+                return True
+
+            def get_attribute(self, name):
+                return None
+
+        class FakeHeading:
+            def __init__(self, x, y):
+                self.rect = {"x": x, "y": y, "width": 200, "height": 40}
+
+            def is_displayed(self):
+                return True
+
+        # Row 1: GSTR-1 at x=210, GSTR-2B at x=660. Row 2: GSTR-3B at x=210.
+        buttons = [
+            FakeButton("VIEW", 240, 145), FakeButton("DOWNLOAD", 350, 145),
+            FakeButton("VIEW", 690, 145), FakeButton("DOWNLOAD", 770, 145),
+            FakeButton("VIEW GSTR3B", 220, 300), FakeButton("DOWNLOAD", 360, 300),
+        ]
+        session = GstBrowserSession("/tmp")
+        session._heading_element = lambda labels: FakeHeading(660, 70)
+        session._action_candidates = lambda labels: [
+            (button, " ".join(button.text.split()).lower() in labels)
+            for button in buttons
+            if any(label in button.text.lower() for label in labels)
+        ]
+        clicked = []
+        session._click_element = clicked.append
+
+        self.assertTrue(session._tile_action(["gstr-2b"], ["view", "download"]))
+        # GSTR-2B's own VIEW, not GSTR-1's identical one further left.
+        self.assertEqual(clicked[0].rect["x"], 690)
+        self.assertEqual(clicked[0].text, "VIEW")
+
+    def test_tile_action_ignores_buttons_above_the_heading(self):
+        """A tile's button never sits above its heading, but another tile's does."""
+        class FakeButton:
+            def __init__(self, text, x, y):
+                self.text = text
+                self.rect = {"x": x, "y": y, "width": 90, "height": 30}
+
+        class FakeHeading:
+            rect = {"x": 210, "y": 260, "width": 200, "height": 40}
+
+        session = GstBrowserSession("/tmp")
+        session._heading_element = lambda labels: FakeHeading()
+        # The only candidate belongs to the tile in the row above.
+        session._action_candidates = lambda labels: [(FakeButton("VIEW", 240, 145), True)]
+        session._click_element = lambda element: self.fail("clicked another tile's button")
+
+        self.assertFalse(session._tile_action(["gstr-3b"], ["view"]))
+
     def test_tile_lookup_walks_up_from_the_deepest_match(self):
         """The tile is the block around the heading, never a page-wide wrapper.
 
