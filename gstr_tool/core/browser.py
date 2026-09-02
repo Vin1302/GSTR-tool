@@ -914,7 +914,10 @@ class GstBrowserSession:
             # VIEW, not DOWNLOAD: the statement page is the one carrying
             # DOWNLOAD GSTR-2B DETAILS (EXCEL). DOWNLOAD leads to the
             # generate-a-file page, which is the fallback.
-            enter_labels=["view", "download"],
+            # Follow the demonstrated route exactly. The tile's DOWNLOAD opens
+            # a different generate/export page; VIEW opens the statement whose
+            # footer has DOWNLOAD GSTR-2B DETAILS (EXCEL).
+            enter_labels=["view"],
             # GSTR-1, GSTR-2A and GSTR-2B all offer a plain VIEW, so the tile
             # is identified as the block naming GSTR-2B and nothing else.
             foreign_labels=["gstr-1", "gstr-3b", "gstr-2a"],
@@ -968,19 +971,25 @@ class GstBrowserSession:
                 continue
 
             jobs = (
-                ("GSTR-1 / E-Invoice", 2,
+                ("GSTR-1 / E-Invoice", 2, False,
                  lambda label, url: self._download_gstr1_group(label, report_folders, url)),
-                ("GSTR-3B", 1,
+                ("GSTR-3B", 1, True,
                  lambda label, url: self._download_gstr3b(label, report_folders["GSTR-3B"], url)),
-                ("GSTR-2B", 1,
+                ("GSTR-2B", 1, True,
                  lambda label, url: self._download_gstr2b(label, report_folders["GSTR-2B"], url)),
             )
-            for name, weight, runner in jobs:
+            for name, weight, reselect_period, runner in jobs:
                 if progress:
                     progress(min(100, int(completed * 100 / total)),
-                             f"{name} {period_label}: opening the report and downloading…")
+                             (f"{name} {period_label}: reselecting FY, Quarter {quarter}, "
+                              f"{month}, then SEARCH…" if reselect_period else
+                              f"{name} {period_label}: opening the report and downloading…"))
                 try:
-                    if self._tile(self.GSTR1_TILE) is None and self._tile(self.GSTR3B_TILE) is None:
+                    # GST does not reliably preserve a searched month after a
+                    # report is opened. Reproduce the manual flow: return to
+                    # File Returns and explicitly select/search the same month
+                    # again before GSTR-3B, and once more before GSTR-2B.
+                    if reselect_period:
                         self._prepare_period(financial_year, quarter, month)
                     messages = runner(period_label, self.driver.current_url)
                 except Exception as exc:
