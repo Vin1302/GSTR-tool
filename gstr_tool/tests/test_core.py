@@ -250,6 +250,20 @@ class GstrToolTests(unittest.TestCase):
         self.assertFalse(session._click_scoped_action(
             ["gstr-2b"], ["view"], ["gstr-1", "gstr-3b", "gstr-2a"]))
 
+    def test_gstr3b_detail_is_not_mistaken_for_monthly_tiles(self):
+        session = GstBrowserSession("/tmp")
+        session._has_button = lambda labels: False
+        session._heading_element = lambda labels: object()
+
+        self.assertFalse(session._monthly_tiles_visible())
+
+    def test_monthly_tiles_require_gstr3b_action_and_gstr2b_heading(self):
+        session = GstBrowserSession("/tmp")
+        session._has_button = lambda labels: "view gstr3b" in labels
+        session._heading_element = lambda labels: object() if labels == session.GSTR2B_TILE else None
+
+        self.assertTrue(session._monthly_tiles_visible())
+
     def test_summary_separates_skipped_from_failed(self):
         results = [
             "GSTR-1 PDF Apr-2025: Apr-2025_GSTR1_pdf_x.pdf",

@@ -353,9 +353,8 @@ class GstBrowserSession:
 
     def _return_to_monthly_tiles(self, results_url: str) -> None:
         """Use GST BACK controls until the selected month's tiles are restored."""
-        monthly_tile_labels = self.GSTR3B_TILE + self.GSTR2B_TILE
-        for _ in range(3):
-            if self._tile(monthly_tile_labels) is not None:
+        for _ in range(4):
+            if self._monthly_tiles_visible():
                 break
             if self._click_exact_button(["back"]):
                 time.sleep(2.5)
@@ -367,6 +366,20 @@ class GstBrowserSession:
             break
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
+
+    def _monthly_tiles_visible(self) -> bool:
+        """Return true only on File Returns results, not inside a report.
+
+        A GSTR-3B detail page naturally contains the text ``GSTR-3B`` and its
+        own buttons, so treating one matching report block as proof that the
+        dashboard was restored left the browser inside GSTR-3B.  The results
+        page uniquely combines the VIEW GSTR3B tile action with the GSTR-2B
+        heading.
+        """
+        return (
+            self._has_button(["view gstr3b", "view gstr-3b"])
+            and self._heading_element(self.GSTR2B_TILE) is not None
+        )
 
     def _tile(self, labels: list[str]):
         """Return the one dashboard tile whose heading contains a label.
@@ -905,7 +918,10 @@ class GstBrowserSession:
             # GSTR-1, GSTR-2A and GSTR-2B all offer a plain VIEW, so the tile
             # is identified as the block naming GSTR-2B and nothing else.
             foreign_labels=["gstr-1", "gstr-3b", "gstr-2a"],
-            kind="excel", generated=True,
+            # DOWNLOAD GSTR-2B DETAILS (EXCEL) starts a direct browser
+            # download on the statement page shown in the manual recording.
+            # It is not the asynchronous generate/link workflow.
+            kind="excel", generated=False,
         )
         self._return_to_monthly_tiles(results_url)
         return [message]
