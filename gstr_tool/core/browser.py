@@ -575,7 +575,8 @@ class GstBrowserSession:
 
     def _download_inside_tile(self, report: str, period_label: str, folder: Path,
                               tile_labels: list[str], download_labels: list[str],
-                              enter_labels: list[str], *, kind: str = "",
+                              enter_labels: list[str], *, foreign_labels: list[str],
+                              unique_labels: list[str] | None = None, kind: str = "",
                               generated: bool = False, timeout: int = 120) -> str:
         """Open the report from its tile, scroll down, and take the download there.
 
@@ -594,9 +595,10 @@ class GstBrowserSession:
                 return f"{label}: already downloaded ({existing.name})"
         if self._heading_element(tile_labels) is None:
             return f"{label}: tile not available for this period"
-        if not self._tile_action(tile_labels, enter_labels):
-            return (f"{label}: found the tile but none of its buttons matched "
-                    f"({', '.join(enter_labels)})")
+        how = self._open_report(tile_labels, enter_labels, foreign_labels, unique_labels)
+        if not how:
+            return (f"{label}: found the tile but could not open it "
+                    f"(looked for {', '.join((unique_labels or []) + enter_labels)})")
         time.sleep(3)
         self.dismiss_post_login_prompts(timeout=2)
         # GSTR-3B opens behind a "System generated summary for GSTR-3B" dialog
@@ -605,9 +607,11 @@ class GstBrowserSession:
         self._scroll_to_bottom()
         self._prepare_click()
         if not self._wait_and_click_text(download_labels, timeout=25):
-            return f"{label}: download action not available on the report page"
-        return self._collect(report, period_label, folder, label,
-                             kind=kind, generated=generated, timeout=timeout)
+            return (f"{label}: {how}, but no download button there "
+                    f"(looked for {', '.join(download_labels[:3])})")
+        message = self._collect(report, period_label, folder, label,
+                                kind=kind, generated=generated, timeout=timeout)
+        return f"{message} [{how}]"
 
     def _heading_element(self, labels: list[str]):
         """Return the deepest visible element carrying one of ``labels``."""
@@ -650,15 +654,62 @@ class GstBrowserSession:
         except Exception:
             self.driver.execute_script("arguments[0].click();", element)
 
-    def _tile_action(self, tile_labels: list[str], action_labels: list[str]) -> bool:
-        """Click the button that visually belongs to a tile's heading.
+    def _open_report(self, tile_labels: list[str], action_labels: list[str],
+                     foreign_labels: list[str], unique_labels: list[str] | None = None) -> str:
+        """Open one report from the dashboard. Returns the strategy that worked.
 
-        The dashboard tiles share no stable DOM shape: walking up from a
-        heading finds either a header block holding no buttons at all, or a
-        wrapper holding every tile — which is how each report ended up driving
-        GSTR-1. The button is therefore chosen the way a person reads it, by
-        position: the nearest match sitting below the heading and overlapping
-        it horizontally.
+        Three strategies, most certain first, because the dashboard tiles share
+        no stable DOM shape and the window is minimized while this runs:
+
+        1. A button whose wording belongs to one report only — VIEW GSTR3B is
+           on no other tile — can simply be clicked wherever it is.
+        2. Otherwise the tile is the smallest block around its heading that
+           holds a matching button and mentions no other report. Three tiles
+           carry a button reading VIEW; "contains GSTR-2B and not GSTR-1,
+           GSTR-2A or GSTR-3B" is what separates them.
+        3. Position, last: a minimized window reports unreliable geometry, so
+           this is a fallback rather than the primary method.
+        """
+        for label in unique_labels or []:
+            if self._click_exact_button([label]):
+                return f"clicked {label}"
+        if self._click_scoped_action(tile_labels, action_labels, foreign_labels):
+            return "opened from its tile"
+        if self._tile_action(tile_labels, action_labels):
+            return "opened by position"
+        return ""
+
+    def _click_scoped_action(self, tile_labels: list[str], action_labels: list[str],
+                             foreign_labels: list[str]) -> bool:
+        """Click an action inside the block that holds this tile's heading alone."""
+        from selenium.webdriver.common.by import By
+
+        heading = self._heading_element(tile_labels)
+        if heading is None:
+            return False
+        node = heading
+        for _ in range(10):
+            parents = node.find_elements(By.XPATH, "..")
+            if not parents:
+                return False
+            node = parents[0]
+            try:
+                text = (node.text or "").lower()
+            except Exception:
+                return False
+            # Once another report's name appears, the block has grown past
+            # this tile and its buttons are no longer only this tile's.
+            if any(foreign in text for foreign in foreign_labels):
+                return False
+            if self._click_text(action_labels, node):
+                return True
+        return False
+
+    def _tile_action(self, tile_labels: list[str], action_labels: list[str]) -> bool:
+        """Click the button sitting nearest below a tile's heading.
+
+        Geometry is the last resort: Chrome is minimized during a run and may
+        report stale or zero rectangles, which is why this alone was not enough.
         """
         heading = self._heading_element(tile_labels)
         if heading is None:
@@ -834,6 +885,9 @@ class GstBrowserSession:
             "GSTR-3B", period_label, folder, self.GSTR3B_TILE,
             self.GSTR3B_DOWNLOAD_LABELS,
             enter_labels=["view gstr3b", "view gstr-3b", "download", "view"],
+            # VIEW GSTR3B appears on no other tile, so it needs no scoping.
+            unique_labels=["view gstr3b", "view gstr-3b"],
+            foreign_labels=["gstr-1", "gstr-2b", "gstr-2a"],
             timeout=90,
         )
         self._return_to_monthly_tiles(results_url)
@@ -848,6 +902,9 @@ class GstBrowserSession:
             # DOWNLOAD GSTR-2B DETAILS (EXCEL). DOWNLOAD leads to the
             # generate-a-file page, which is the fallback.
             enter_labels=["view", "download"],
+            # GSTR-1, GSTR-2A and GSTR-2B all offer a plain VIEW, so the tile
+            # is identified as the block naming GSTR-2B and nothing else.
+            foreign_labels=["gstr-1", "gstr-3b", "gstr-2a"],
             kind="excel", generated=True,
         )
         self._return_to_monthly_tiles(results_url)
@@ -926,7 +983,7 @@ class GstBrowserSession:
         # Append so a re-run that fills gaps keeps the earlier history.
         stamp = f"# run {datetime.now():%Y-%m-%d %H:%M:%S} — {financial_year}"
         with manifest.open("a", encoding="utf-8") as handle:
-            handle.write("\n".join([stamp, *results]) + "\n")
+            handle.write("\n".join([stamp, *results, *self._summarise(results)]) + "\n")
         logged_out = self.logout()
         return {
             "root": str(root),
@@ -935,6 +992,28 @@ class GstBrowserSession:
             "manifest": str(manifest),
             "logged_out": logged_out,
         }
+
+    @staticmethod
+    def _summarise(results: list[str]) -> list[str]:
+        """Count what the run actually did, so a re-run reads unambiguously.
+
+        A report that was already on disk is skipped, which looks identical to
+        a failure if only the folder is checked — this says which it was.
+        """
+        saved = skipped = failed = 0
+        for line in results:
+            lowered = line.lower()
+            if ": already downloaded" in lowered:
+                skipped += 1
+            elif "not available" in lowered or "not ready" in lowered or "failed" in lowered \
+                    or "could not" in lowered:
+                failed += 1
+            else:
+                saved += 1
+        return ["# ---",
+                f"# {saved} file(s) downloaded, {skipped} already present and skipped, "
+                f"{failed} not obtained",
+                "# Delete a file to have it fetched again on the next run."]
 
     @classmethod
     def resolve_client_root(cls, base: str | Path, client: str, financial_year: str) -> Path:

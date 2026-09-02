@@ -197,6 +197,70 @@ class GstrToolTests(unittest.TestCase):
             self.assertEqual(commands.count("Browser.setDownloadBehavior"), 2)
             self.assertTrue(all(path == str(session.staging.resolve()) for _, path in sent))
 
+    def test_scoped_action_stops_at_a_block_naming_another_report(self):
+        """The tile is the block naming this report and no other.
+
+        Three tiles carry a button reading VIEW, so a container that also
+        mentions GSTR-1 is too big to be the GSTR-2B tile — which is how every
+        report ended up clicking GSTR-1's button.
+        """
+        class FakeNode:
+            def __init__(self, text, parent=None, clickable=False):
+                self.text = text
+                self.parent = parent
+                self.clickable = clickable
+
+            def find_elements(self, by, xpath):
+                return [self.parent] if xpath == ".." and self.parent else []
+
+        page = FakeNode("Details of outward supplies GSTR-1 VIEW DOWNLOAD "
+                        "Auto - drafted ITC Statement GSTR-2B VIEW DOWNLOAD", clickable=True)
+        tile = FakeNode("Auto - drafted ITC Statement for the month GSTR-2B VIEW DOWNLOAD",
+                        parent=page, clickable=True)
+        header = FakeNode("Auto - drafted ITC Statement for the month GSTR-2B", parent=tile)
+        heading = FakeNode("GSTR-2B", parent=header)
+
+        session = GstBrowserSession("/tmp")
+        session._heading_element = lambda labels: heading
+        clicked = []
+        session._click_text = lambda labels, root=None: (
+            clicked.append(root) or True) if getattr(root, "clickable", False) else False
+
+        opened = session._click_scoped_action(
+            ["gstr-2b"], ["view"], ["gstr-1", "gstr-3b", "gstr-2a"])
+
+        self.assertTrue(opened)
+        self.assertIs(clicked[0], tile, "clicked outside the GSTR-2B tile")
+
+    def test_scoped_action_refuses_when_only_the_whole_page_matches(self):
+        class FakeNode:
+            def __init__(self, text, parent=None):
+                self.text = text
+                self.parent = parent
+
+            def find_elements(self, by, xpath):
+                return [self.parent] if xpath == ".." and self.parent else []
+
+        page = FakeNode("GSTR-1 VIEW GSTR-2B VIEW")
+        heading = FakeNode("GSTR-2B", parent=page)
+        session = GstBrowserSession("/tmp")
+        session._heading_element = lambda labels: heading
+        session._click_text = lambda labels, root=None: True
+
+        self.assertFalse(session._click_scoped_action(
+            ["gstr-2b"], ["view"], ["gstr-1", "gstr-3b", "gstr-2a"]))
+
+    def test_summary_separates_skipped_from_failed(self):
+        results = [
+            "GSTR-1 PDF Apr-2025: Apr-2025_GSTR1_pdf_x.pdf",
+            "GSTR-1 PDF May-2025: already downloaded (May-2025_GSTR1_pdf_x.pdf)",
+            "GSTR-2B EXCEL Apr-2025: tile not available for this period",
+        ]
+        summary = " ".join(GstBrowserSession._summarise(results))
+        self.assertIn("1 file(s) downloaded", summary)
+        self.assertIn("1 already present and skipped", summary)
+        self.assertIn("1 not obtained", summary)
+
     def test_tile_action_picks_the_button_under_its_own_heading(self):
         """Laid out as the portal lays the dashboard out, from the recording.
 
