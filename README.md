@@ -19,8 +19,13 @@ period is worked in this order:
 |---|---|---|
 | 1. e-Invoice | GSTR-1 tile → **VIEW** → scroll down → **VIEW INVOICES** → *Download details from e-invoices (Excel)* | `<period>_EInvoice_*` |
 | 2. GSTR-1 | back on the GSTR-1 page → **VIEW SUMMARY** → *DOWNLOAD SUMMARY (PDF)* | `<period>_GSTR1_pdf_*` |
-| 3. GSTR-3B | Tile → **VIEW GSTR3B** → scroll down → *DOWNLOAD FILED GSTR-3B* | `<period>_GSTR3B_*` |
-| 4. GSTR-2B | Tile → **DOWNLOAD** → scroll down → *GENERATE EXCEL FILE TO DOWNLOAD* (reads *DOWNLOAD EXCEL* once GSTN has built it) | `<period>_GSTR2B_excel_*` |
+| 3. GSTR-3B | Tile → **VIEW GSTR3B** → close the *System generated summary for GSTR-3B* dialog → scroll down → *DOWNLOAD FILED GSTR-3B* | `<period>_GSTR3B_*` |
+| 4. GSTR-2B | Tile → **VIEW** → scroll down → *DOWNLOAD GSTR-2B DETAILS (EXCEL)* | `<period>_GSTR2B_excel_*` |
+
+The GSTR-2B tile heading is rendered "Auto - drafted ITC Statement for the
+month", with spaces around the hyphen, so both spellings are matched. Its
+DOWNLOAD button leads to a generate-a-file page and is kept only as a fallback;
+the Excel export lives on the VIEW page.
 
 Exactly one file is taken per report. Only PDF spellings are accepted for GSTR-1,
 because a bare "download summary" also matches the portal's DOWNLOAD SUMMARY

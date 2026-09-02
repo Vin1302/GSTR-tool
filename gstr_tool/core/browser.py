@@ -284,9 +284,16 @@ class GstBrowserSession:
         return False
 
     def _wait_and_click_text(self, labels: list[str], timeout: int = 60, root=None) -> bool:
+        """Poll for a button until it appears, clicking it once it does.
+
+        The onboarding-reminder sweep costs about a second, so it runs on the
+        first pass and then only every fifth one. Doing it on every pass roughly
+        doubled the time each report spent waiting.
+        """
         deadline = time.time() + timeout
+        attempt = 0
         while time.time() < deadline:
-            if root is None:
+            if root is None and attempt % 5 == 0:
                 self.dismiss_post_login_prompts(timeout=1)
             try:
                 if self._click_text(labels, root):
@@ -294,7 +301,8 @@ class GstBrowserSession:
             except Exception:
                 if root is not None:
                     return False
-            time.sleep(1)
+            attempt += 1
+            time.sleep(0.5)
         return False
 
     def _click_returns_search(self) -> bool:
@@ -349,28 +357,57 @@ class GstBrowserSession:
             if self._tile(monthly_tile_labels) is not None:
                 break
             if self._click_exact_button(["back"]):
-                time.sleep(4)
+                time.sleep(2.5)
                 continue
             if self.driver.current_url != results_url:
                 self.driver.back()
-                time.sleep(4)
+                time.sleep(2.5)
                 continue
             break
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1)
 
     def _tile(self, labels: list[str]):
+        """Return the one dashboard tile whose heading contains a label.
+
+        Matching every element that *contains* the text also matches the page's
+        outer wrappers, and those come back first in document order. Taking the
+        first match therefore handed back a container holding every tile, whose
+        first DOWNLOAD button belongs to GSTR-1 — so each report ended up
+        driving the GSTR-1 tile. Only the deepest elements holding the text are
+        considered, and the tile is the nearest block around one of them that
+        carries its own buttons.
+        """
         from selenium.webdriver.common.by import By
 
+        upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        lower = "abcdefghijklmnopqrstuvwxyz"
         for label in labels:
             needle = label.lower()
-            xpath = (
-                "//*[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
-                f"'{needle}')]/ancestor::div[.//button or .//a][1]"
-            )
-            visible = [element for element in self.driver.find_elements(By.XPATH, xpath) if element.is_displayed()]
-            if visible:
-                return visible[0]
+            contains = f"contains(translate(normalize-space(.),'{upper}','{lower}'),'{needle}')"
+            deepest = f"//*[{contains}][not(.//*[{contains}])]"
+            for element in self.driver.find_elements(By.XPATH, deepest):
+                if not element.is_displayed():
+                    continue
+                container = self._tile_container(element)
+                if container is not None:
+                    return container
+        return None
+
+    def _tile_container(self, element):
+        """Walk up from a tile's heading to the nearest block holding buttons."""
+        from selenium.webdriver.common.by import By
+
+        node = element
+        for _ in range(6):
+            parents = node.find_elements(By.XPATH, "..")
+            if not parents:
+                return None
+            node = parents[0]
+            actions = node.find_elements(
+                By.XPATH, ".//button | .//a[@href] | .//*[@role='button']")
+            if any(action.is_displayed() and action.is_enabled() for action in actions):
+                return node
         return None
 
     def _prepare_period(self, financial_year: str, quarter: str, month: str) -> None:
@@ -395,10 +432,15 @@ class GstBrowserSession:
         ], text=month)
         if not self._click_returns_search():
             raise RuntimeError("GST Portal SEARCH button was not found.")
-        time.sleep(4)
-        self.dismiss_post_login_prompts()
-        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
+        # Wait for the tiles themselves rather than a fixed pause: SEARCH
+        # usually returns in about a second, and this runs twelve times a year.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if self._tile(self.GSTR1_TILE) is not None:
+                break
+            time.sleep(0.5)
+        self.dismiss_post_login_prompts(timeout=2)
+        self._scroll_to_bottom()
 
     @staticmethod
     def _snapshot(folder: Path) -> set[Path]:
@@ -562,8 +604,11 @@ class GstBrowserSession:
         if not opened:
             return (f"{label}: could not open the tile "
                     f"({', '.join(enter_labels)} were not found on it)")
-        time.sleep(4)
+        time.sleep(3)
         self.dismiss_post_login_prompts(timeout=2)
+        # GSTR-3B opens behind a "System generated summary for GSTR-3B" dialog
+        # that covers the buttons underneath it.
+        self._wait_and_click_text(["close"], timeout=6)
         self._scroll_to_bottom()
         self._prepare_click()
         if not self._wait_and_click_text(download_labels, timeout=25):
@@ -645,7 +690,10 @@ class GstBrowserSession:
     # ------------------------------------------------------------------
     GSTR1_TILE = ["details of outward supplies", "gstr-1"]
     GSTR3B_TILE = ["monthly return gstr-3b", "monthly return gstr3b", "gstr-3b"]
-    GSTR2B_TILE = ["auto-drafted itc statement", "gstr-2b"]
+    # The portal renders "Auto - drafted ITC Statement for the month", with
+    # spaces around the hyphen, so both spellings are matched.
+    GSTR2B_TILE = ["auto - drafted itc statement", "auto-drafted itc statement",
+                   "auto drafted itc statement", "gstr-2b"]
 
     E_INVOICE_LABELS = ["download details from e-invoices (excel)",
                         "download details from e-invoice (excel)",
@@ -705,8 +753,8 @@ class GstBrowserSession:
     # the first once a period exceeds 1000 documents and expects the second.
     # Excel spellings only, and never the bare "download gstr-2b summary", which
     # would also match the (PDF) button beside it.
-    GSTR2B_DOWNLOAD_LABELS = ["download gstr-2b summary (excel)", "generate excel file to download",
-                              "download gstr-2b details (excel)", "download excel file",
+    GSTR2B_DOWNLOAD_LABELS = ["download gstr-2b details (excel)", "download gstr-2b summary (excel)",
+                              "generate excel file to download", "download excel file",
                               "download excel", "generate excel"]
 
     def _download_gstr3b(self, period_label: str, folder: Path, results_url: str) -> list[str]:
@@ -725,7 +773,10 @@ class GstBrowserSession:
         message = self._download_inside_tile(
             "GSTR-2B", period_label, folder, self.GSTR2B_TILE,
             self.GSTR2B_DOWNLOAD_LABELS,
-            enter_labels=["download", "view"],
+            # VIEW, not DOWNLOAD: the statement page is the one carrying
+            # DOWNLOAD GSTR-2B DETAILS (EXCEL). DOWNLOAD leads to the
+            # generate-a-file page, which is the fallback.
+            enter_labels=["view", "download"],
             kind="excel", generated=True,
         )
         self._return_to_monthly_tiles(results_url)

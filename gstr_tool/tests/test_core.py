@@ -197,6 +197,42 @@ class GstrToolTests(unittest.TestCase):
             self.assertEqual(commands.count("Browser.setDownloadBehavior"), 2)
             self.assertTrue(all(path == str(session.staging.resolve()) for _, path in sent))
 
+    def test_tile_lookup_walks_up_from_the_deepest_match(self):
+        """The tile is the block around the heading, never a page-wide wrapper.
+
+        Matching every element that contains the text also matches the outer
+        wrappers, which come first in document order. Taking that match handed
+        back a container holding every tile, so clicking "DOWNLOAD" inside it
+        hit GSTR-1's button and every report drove the GSTR-1 tile.
+        """
+        class FakeElement:
+            def __init__(self, name, parent=None, buttons=()):
+                self.name = name
+                self.parent = parent
+                self.buttons = list(buttons)
+
+            def is_displayed(self):
+                return True
+
+            def is_enabled(self):
+                return True
+
+            def find_elements(self, by, xpath):
+                if xpath == "..":
+                    return [self.parent] if self.parent else []
+                return self.buttons
+
+        page = FakeElement("page-wrapper", buttons=[FakeElement("GSTR-1 DOWNLOAD")])
+        tile = FakeElement("gstr-2b-tile", parent=page,
+                           buttons=[FakeElement("GSTR-2B DOWNLOAD")])
+        heading = FakeElement("heading", parent=tile)
+
+        session = GstBrowserSession("/tmp")
+        found = session._tile_container(heading)
+
+        self.assertIs(found, tile)
+        self.assertEqual([button.name for button in found.buttons], ["GSTR-2B DOWNLOAD"])
+
     def test_report_is_guessed_from_the_portal_file_name(self):
         guess = GstBrowserSession._guess_report
         self.assertEqual(guess("einvoice_042025.xlsx"), "E-Invoice")
